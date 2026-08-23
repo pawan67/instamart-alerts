@@ -8,13 +8,13 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/playwright
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
-RUN uv pip install --system .
-
-RUN playwright install --with-deps chromium
+RUN uv sync --frozen --no-install-project
 
 COPY . .
+RUN uv sync --frozen
 
-# Expose port for the serve command
+RUN uv run playwright install --with-deps chromium
+
 EXPOSE 8080
 
 CMD ["uv", "run", "im", "serve", "--host", "0.0.0.0", "--port", "8080"]
