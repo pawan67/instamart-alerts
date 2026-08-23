@@ -634,7 +634,7 @@ let state = { area: "", watches: [] };
 let openIdx = -1;
 
 const $ = id => document.getElementById(id);
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&","<":"<",">":">",'"':""" }[c]));
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
