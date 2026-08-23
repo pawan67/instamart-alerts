@@ -90,7 +90,16 @@ def mint_token(settings: Settings) -> SessionData:
         "args": ["--disable-blink-features=AutomationControlled"],
     }
     if settings.proxy:
-        launch["proxy"] = {"server": settings.proxy}
+        import urllib.parse
+        parsed = urllib.parse.urlparse(settings.proxy)
+        if parsed.username and parsed.password:
+            launch["proxy"] = {
+                "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
+                "username": parsed.username,
+                "password": parsed.password,
+            }
+        else:
+            launch["proxy"] = {"server": settings.proxy}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch)
