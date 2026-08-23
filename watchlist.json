@@ -1,0 +1,13 @@
+{
+  "watches": [
+    {
+      "name": "Eggs",
+      "query": "eggs",
+      "min_discount_pct": 65,
+      "categories": ["Eggs"],
+      "exclude": ["batter", "paneer"],
+      "in_stock_only": true,
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Instamart Alerts</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Gilroy:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --sec: var(--tg-theme-secondary-bg-color, #fdf5ee);
+    --fg: var(--tg-theme-text-color, #0a0a0a);
+    --hint: var(--tg-theme-hint-color, #6b6b6b);
+    --link: var(--tg-theme-link-color, #0050ff);
+    --btn-fg: var(--tg-theme-button-text-color, #ffffff);
+
+    --im-blue: #0050ff;
+    --im-blue-rgb: 0, 80, 255;
+    --im-blue-light: #a4fffd;
+    --im-blue-lighter: #d9f5ff;
+    --im-blue-dark: #003dbd;
+
+    --swiggy-orange: #ff5200;
+    --swiggy-orange-rgb: 255, 82, 0;
+    --swiggy-orange-light: #ff8c42;
+    --swiggy-orange-lighter: #fff4ed;
+    --swiggy-orange-dark: #cc4200;
+
+    --salt: #fdf5ee;
+    --white: #ffffff;
+
+    --good: #00b85c;
+    --good-rgb: 0, 184, 92;
+    --danger: #ff3b30;
+    --danger-rgb: 255, 59, 48;
+
+    --line: rgba(0, 0, 0, .08);
+    --line-strong: rgba(0, 0, 0, .18);
+    --field: rgba(0, 0, 0, .04);
+    --shadow: 0 4px 20px rgba(0, 80, 255, .12);
+    --shadow-strong: 0 8px 32px rgba(0, 80, 255, .18);
+
+    --sans: "Gilroy", "Helvetica Neue", Helvetica, sans-serif;
+    --mono: "SF Mono", "Fira Mono", ui-monospace, monospace;
+
+    --r-lg: 16px;
+    --r-md: 12px;
+    --r-sm: 8px;
+    --r-pill: 100px;
+  }
+  html.dark {
+    --bg: var(--tg-theme-bg-color, #0a0a0a);
+    --sec: var(--tg-theme-secondary-bg-color, #141414);
+    --fg: var(--tg-theme-text-color, #ffffff);
+    --hint: var(--tg-theme-hint-color, #8a8a8a);
+    --link: var(--tg-theme-link-color, #529fff);
+    --btn-fg: var(--tg-theme-button-text-color, #0a0a0a);
+
+    --im-blue-light: #a4fffd;
+    --im-blue-lighter: rgba(0, 80, 255, .18);
+    --im-blue-dark: #529fff;
+
+    --swiggy-orange-lighter: rgba(255, 82, 0, .12);
+    --swiggy-orange-dark: #ff8c42;
+
+    --line: rgba(255, 255, 255, .1);
+    --line-strong: rgba(255, 255, 255, .22);
+    --field: rgba(255, 255, 255, .06);
+    --shadow: 0 4px 20px rgba(0, 80, 255, .25);
+    --shadow-strong: 0 8px 32px rgba(0, 80, 255, .35);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    padding: 24px 16px calc(56px + env(safe-area-inset-bottom));
+    font: 15px/1.5 var(--sans);
+    background: var(--bg);
+    color: var(--fg);
+    font-weight: 400;
+    letter-spacing: -.01em;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(80% 50% at 100% -20%, var(--im-blue-lighter), transparent 60%),
+      radial-gradient(60% 40% at 0% 120%, var(--swiggy-orange-lighter), transparent 70%);
+    z-index: 0;
+  }
+
+  body::after {
+    content: "";
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    height: 40%;
+    pointer-events: none;
+    z-index: 0;
+    background: linear-gradient(180deg, transparent, var(--swiggy-orange-lighter));
+    opacity: .6;
+  }
+
+  main { position: relative; z-index: 1; max-width: 420px; margin: 0 auto; }
+
+  ::selection { background: var(--im-blue); color: var(--white); }
+
+  a {
+    color: var(--im-blue);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(var(--im-blue-rgb), .3);
+    text-underline-offset: 3px;
+    transition: color .15s, border-color .15s;
+  }
+  a:hover, a:active { color: var(--im-blue-dark); border-color: var(--im-blue); }
+
+  /* ---------- header ---------- */
+
+  .masthead {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 4px;
+    animation: rise .5s cubic-bezier(.2,.7,.2,1) both;
+  }
+  .brand-mark {
+    width: 44px; height: 44px;
+    flex: 0 0 auto;
+    display: grid; place-items: center;
+    background: var(--im-blue);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .brand-mark svg { width: 24px; height: 24px; }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -.02em;
+    text-transform: uppercase;
+    margin: 0;
+    color: var(--fg);
+  }
+  h1 em {
+    font-style: normal;
+    font-weight: 300;
+    color: var(--hint);
+  }
+
+  .status {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 3px;
+    font: 500 10px/1 var(--mono);
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--hint);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 10px;
+    max-width: 46vw;
+    background: var(--sec);
+  }
+  .status b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot {
+    width: 7px; height: 7px; flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--good);
+    box-shadow: 0 0 0 0 rgba(var(--good-rgb), .5);
+    animation: ping 2.2s ease-out infinite;
+  }
+  .status.warn .dot { background: var(--danger); animation-name: ping-red; }
+  .status.warn { color: var(--danger); border-color: rgba(var(--danger-rgb), .35); }
+
+  .tickerline {
+    height: 8px;
+    margin: 18px 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: repeating-linear-gradient(
+      90deg, var(--line) 0 1px, transparent 1px 12px
+    ) bottom / 100% 4px no-repeat;
+    animation: rise .5s .06s cubic-bezier(.2,.7,.2,1) both;
+  }
+
+  /* ---------- panels (bento style) ---------- */
+
+  
+  .card {
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 20px;
+    padding: 24px 20px 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+    position: relative;
+    overflow: hidden;
+  }
+  html.dark .card {
+    background: rgba(20, 20, 20, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  }
+
+  .card:nth-of-type(1) { animation: rise .5s .12s cubic-bezier(.2,.7,.2,1) both; }
+  .card:nth-of-type(2) { animation: rise .5s .18s cubic-bezier(.2,.7,.2,1) both; }
+  .card:nth-of-type(3) { animation: rise .5s .24s cubic-bezier(.2,.7,.2,1) both; }
+
+  .card::before {
+    content: "";
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, var(--im-blue), var(--swiggy-orange));
+    border-radius: 0 0 var(--r-lg) var(--r-lg);
+    opacity: .7;
+  }
+
+  .card h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font: 700 11px/1 var(--sans);
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--hint);
+    margin: 0 0 14px;
+  }
+  .card h2 .idx {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-stretch: 100%;
+    letter-spacing: 0;
+    color: var(--im-blue);
+  }
+  .card h2::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+
+  /* ---------- forms ---------- */
+
+  label {
+    display: block;
+    font: 500 10px/1.3 var(--mono);
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--hint);
+    margin: 14px 0 6px;
+  }
+  label:first-of-type { margin-top: 0; }
+
+  input[type=text], input[type=number] {
+    width: 100%;
+    padding: 13px 14px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--line);
+    background: var(--field);
+    color: var(--fg);
+    font: 500 15px/1.3 var(--mono);
+    caret-color: var(--im-blue);
+    transition: border-color .15s, box-shadow .15s, background .15s;
+    appearance: none;
+  }
+  input::placeholder { color: var(--hint); opacity: .5; }
+  input:hover { border-color: var(--line-strong); }
+  input:focus {
+    outline: none;
+    border-color: var(--im-blue);
+    box-shadow: 0 0 0 3px rgba(var(--im-blue-rgb), .18);
+    background: var(--bg);
+  }
+  input::-webkit-outer-spin-button,
+  input::-webkit-inner-spin-
+  button {
+    font: 700 13px/1 var(--sans);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    padding: 16px 20px;
+    cursor: pointer;
+    width: 100%;
+    transition: all .25s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+  button:active { transform: translateY(1px) scale(.98); }
+
+  input[type=number] { -moz-appearance: textfield; }
+
+  /* ---------- buttons ---------- */
+
+  
+  button {
+    font: 700 13px/1 var(--sans);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    padding: 16px 20px;
+    cursor: pointer;
+    width: 100%;
+    transition: all .25s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+  button:active { transform: translateY(1px) scale(.98); }
+
+  button:active { transform: translateY(1px) scale(.99); }
+  button:focus-visible { outline: 2px solid var(--im-blue); outline-offset: 2px; }
+  button:disabled { opacity: .5; cursor: default; transform: none; }
+
+  button.primary {
+    background: var(--im-blue);
+    color: var(--white);
+    box-shadow: var(--shadow);
+  }
+  button.primary:not(:disabled):hover { filter: brightness(1.05); box-shadow: var(--shadow-strong); }
+
+  button.cta {
+    background: var(--im-blue-light);
+    color: #001a1f;
+    font-weight: 800;
+    box-shadow: 0 0 0 1px rgba(var(--im-blue-rgb), .25);
+  }
+  button.cta:not(:disabled):hover { background: var(--im-blue); color: var(--white); }
+
+  button.ghost {
+    background: transparent;
+    color: var(--fg);
+    border-color: var(--line-strong);
+  }
+  button.ghost:not(:disabled):hover { border-color: var(--im-blue); color: var(--im-blue); }
+
+  button.danger {
+    background: transparent;
+    color: var(--danger);
+    border-color: rgba(var(--danger-rgb), .4);
+  }
+  button.danger:not(:disabled):hover { background: rgba(var(--danger-rgb), .1); }
+
+  button.orange {
+    background: var(--swiggy-orange);
+    color: var(--white);
+    box-shadow: 0 4px 20px rgba(var(--swiggy-orange-rgb), .25);
+  }
+  button.orange:not(:disabled):hover { filter: brightness(1.05); }
+
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; min-width: 0; }
+  .row > .fixed { flex: 0 0 auto; width: auto; }
+
+  /* ---------- watches ---------- */
+
+  #add {
+    background: transparent;
+    border: 1px dashed var(--line-strong);
+    color: var(--hint);
+    margin-top: 4px;
+  }
+  #add:not(:disabled):hover { color: var(--im-blue); border-color: var(--im-blue); }
+
+  .empty {
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--r-md);
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--hint);
+    font: 500 12px/1.7 var(--mono);
+    letter-spacing: .04em;
+    margin-bottom: 10px;
+    background: var(--bg);
+  }
+  .empty b {
+    display: block;
+    color: var(--fg);
+    font-weight: 800;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  .watch {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: 14px;
+    margin-bottom: 10px;
+    transition: border-color .2s, opacity .2s;
+  }
+  .watch.open { border-color: var(--line-strong); box-shadow: var(--shadow); }
+  .watch.off .watch-head { opacity: .5; }
+
+  .watch-head { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+
+  .watch-name {
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: -.01em;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chev {
+    flex: 0 0 auto;
+    font: 700 11px/1 var(--mono);
+    color: var(--hint);
+    transition: transform .22s cubic-bezier(.2,.7,.2,1), color .15s;
+  }
+  .watch.open .chev { transform: rotate(90deg); color: var(--im-blue); }
+
+  .pill {
+    flex: 0 0 auto;
+    font: 700 11px/1 var(--mono);
+    letter-spacing: .03em;
+    padding: 6px 10px;
+    border-radius: var(--r-pill);
+    border: 1px solid var(--line-strong);
+    color: var(--hint);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    transition: all .15s;
+  }
+  .pill.hot {
+    border-color: rgba(var(--good-rgb), .5);
+    color: var(--good);
+    background: rgba(var(--good-rgb), .1);
+    box-shadow: 0 0 14px rgba(var(--good-rgb), .15);
+  }
+
+  .switch { position: relative; width: 44px; height: 26px; flex: 0 0 auto; cursor: pointer; }
+  .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .slider {
+    position: absolute; inset: 0;
+    background: var(--field);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    transition: .2s;
+  }
+  .slider::before {
+    content: "";
+    position: absolute;
+    height: 18px; width: 18px;
+    left: 3px; top: 3px;
+    background: var(--hint);
+    border-radius: 4px;
+    transition: .22s cubic-bezier(.2,.7,.2,1);
+    box-shadow: 0 2px 6px rgba(0,0,0,.15);
+  }
+  .switch input:checked + .slider {
+    background: rgba(var(--im-blue-rgb), .15);
+    border-color: var(--im-blue);
+  }
+  .switch input:checked + .slider::before {
+    transform: translateX(18px);
+    background: var(--im-blue);
+    box-shadow: 0 0 10px rgba(var(--im-blue-rgb), .5);
+  }
+  .switch input:focus-visible + .slider { outline: 2px solid var(--im-blue); outline-offset: 2px; }
+
+  .detail {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--line-strong);
+    animation: unfold .28s cubic-bezier(.2,.7,.2,1);
+  }
+  @keyframes unfold { from { opacity: 0; transform: translateY(-6px); } }
+
+  .hidden { display: none !important; }
+  .muted { color: var(--hint); font-size: 12.5px; }
+  .note {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    color: var(--hint);
+    font: 500 11.5px/1.6 var(--mono);
+  }
+  .note::before { content: "›"; color: var(--im-blue); font-weight: 700; }
+
+  /* ---------- messages ---------- */
+
+  .err, .ok {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 9px 12px;
+    border-radius: var(--r-sm);
+    font: 500 12px/1.5 var(--mono);
+    white-space: pre-wrap;
+  }
+  .err {
+    color: var(--danger);
+    background: rgba(var(--danger-rgb), .1);
+    border: 1px solid rgba(var(--danger-rgb), .3);
+  }
+  .err::before { content: "✕ "; font-weight: 700; }
+  .ok {
+    color: var(--good);
+    background: rgba(var(--good-rgb), .1);
+    border: 1px solid rgba(var(--good-rgb), .3);
+  }
+  .ok::before { content: "✓ "; font-weight: 700; }
+
+  /* ---------- product rows ---------- */
+
+  .prod {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 14px;
+  }
+  .prod:last-child { border-bottom: none; }
+  .prod .d {
+    font: 700 16px/1 var(--mono);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 58px;
+    color: var(--hint);
+  }
+  .prod.hot-row .d { color: var(--good); text-shadow: 0 0 18px rgba(var(--good-rgb), .4); }
+  .prod .n { flex: 1; min-width: 0; }
+  .prod .n .qty {
+    display: block;
+    color: var(--hint);
+    font: 500 11px/1.4 var(--mono);
+    letter-spacing: .03em;
+    margin-top: 2px;
+  }
+  .prod .p {
+    font: 600 13px/1 var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    text-align: right;
+  }
+  .prod s { color: var(--hint); font-weight: 400; opacity: .7; font-size: 11.5px; }
+
+  .report { animation: unfold .3s cubic-bezier(.2,.7,.2,1); }
+  .report-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 5px;
+    font: 500 11px/1.5 var(--mono);
+    letter-spacing: .02em;
+    color: var(--hint);
+  }
+  .report-meta i { font-style: normal; color: var(--line-strong); }
+
+  /* ---------- spinner ---------- */
+
+  .spin {
+    display: inline-block;
+    width: 12px; height: 12px;
+    vertical-align: -2px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin .65s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+  @keyframes ping {
+    0% { box-shadow: 0 0 0 0 rgba(var(--good-rgb), .45); }
+    70%, 100% { box-shadow: 0 0 0 8px rgba(var(--good-rgb), 0); }
+  }
+  @keyframes ping-red {
+    0% { box-shadow: 0 0 0 0 rgba(var(--danger-rgb), .45); }
+    70%, 100% { box-shadow: 0 0 0 8px rgba(var(--danger-rgb), 0); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <header class="masthead">
+    <div class="row" style="align-items:flex-start;gap:12px">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round">
+          <path d="M13 2 L5 13.5 H11 L9.5 22 L19 9.5 H12.5 Z"/>
+        </svg>
+      </div>
+      <h1>Instamart<br><em>Alerts</em></h1>
+    </div>
+    <div class="status" id="sub"><span class="dot"></span><b>Loading…</b></div>
+  </header>
+
+  <div class="tickerline"></div>
+
+  <section class="card">
+    <h2><span class="idx">01</span> Delivery area</h2>
+    <div class="row">
+      <input type="text" id="area" placeholder="pincode or area" autocomplete="off" spellcheck="false">
+      <button class="primary fixed" id="save-area" style="width:auto;padding:14px 22px">Save</button>
+    </div>
+    <div class="note">Picks the dark store. Prices differ a lot between stores.</div>
+    <div id="area-msg"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="idx">02</span> Watches</h2>
+    <div id="watches"></div>
+    <button id="add">+ Add watch</button>
+    <div id="watch-msg"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="idx">03</span> Run check</h2>
+    <div class="row">
+      <button class="ghost" id="dry">Preview</button>
+      <button class="cta" id="run">Check & alert</button>
+    </div>
+    <div id="run-msg"></div>
+    <div id="run-out"></div>
+  </section>
+
+</main>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+if (tg?.colorScheme === "dark") document.documentElement.classList.add("dark");
+const INIT = tg?.initData || "";
+
+let state = { area: "", watches: [] };
+let openIdx = -1;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&","<":"<",">":">",'"':""" }[c]));
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "X-Init-Data": INIT, ...(opts.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+  return body;
+}
+
+function msg(el, text, cls = "err") {
+  $(el).innerHTML = text ? `<div class="${cls}">${esc(text)}</div>` : "";
+}
+
+function busy(btn, on, label) {
+  btn.disabled = on;
+  if (on) { btn.dataset.label = btn.textContent; btn.innerHTML = `<span class="spin"></span> ${label || ""}`; }
+  else if (btn.dataset.label) { btn.textContent = btn.dataset.label; }
+}
+
+function haptic(type = "light") { tg?.HapticFeedback?.impactOccurred?.(type); }
+
+function renderWatches() {
+  const box = $("watches");
+  if (!state.watches.length) {
+    box.innerHTML = `<div class="empty"><b>No watches yet</b>Add one to start tracking price drops.</div>`;
+    return;
+  }
+  box.innerHTML = state.watches.map((w, i) => `
+    <div class="watch ${w.enabled ? "" : "off"} ${openIdx === i ? "open" : ""}">
+      <div class="watch-head">
+        <label class="switch">
+          <input type="checkbox" data-act="toggle" data-i="${i}" ${w.enabled ? "checked" : ""}>
+          <span class="slider"></span>
+        </label>
+        <span class="watch-name" data-act="open" data-i="${i}">${esc(w.name || w.query)}</span>
+        <span class="pill" data-act="open" data-i="${i}" data-pill="${i}">≥ ${w.min_discount_pct}%</span>
+        <span class="chev" data-act="open" data-i="${i}">▸</span>
+      </div>
+      <div class="detail ${openIdx === i ? "" : "hidden"}">
+        <label>Name</label>
+        <input type="text" data-f="name" data-i="${i}" value="${esc(w.name)}" autocapitalize="off">
+        <label>Search query</label>
+        <input type="text" data-f="query" data-i="${i}" value="${esc(w.query)}" autocapitalize="off">
+        <label>Alert at or above (% off)</label>
+        <input type="number" data-f="min_discount_pct" data-i="${i}" value="${w.min_discount_pct}" min="0" max="100" step="1">
+        <label>Categories to keep (comma separated)</label>
+        <input type="text" data-f="categories" data-i="${i}" value="${esc(w.categories.join(", "))}" placeholder="Eggs" autocapitalize="off">
+        <label>Exclude names containing</label>
+        <input type="text" data-f="exclude" data-i="${i}" value="${esc(w.exclude.join(", "))}" placeholder="batter, paneer" autocapitalize="off">
+        <label>Max price (blank = any)</label>
+        <input type="number" data-f="max_price" data-i="${i}" value="${w.max_price ?? ""}" min="0" step="1">
+        <div class="row" style="margin-top:16px">
+          <button class="ghost" data-act="preview" data-i="${i}">Live prices</button>
+          <button class="danger" data-act="delete" data-i="${i}">Delete</button>
+        </div>
+        <div data-out="${i}"></div>
+      </div>
+    </div>`).join("");
+}
+
+function productRow(p, hot) {
+  return `
+    <div class="prod ${hot ? "hot-row" : ""}">
+      <span class="d">${p.discount_pct}%</span>
+      <span class="n"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>
+        <span class="qty">${esc(p.quantity)}</span></span>
+      <span class="p">₹${p.price}<br>₹${p.mrp} </span>
+    </div>`;
+}
+
+function renderProducts(target, data, threshold) {
+  const rows = data.products.slice(0, 40).map(p => productRow(p, p.discount_pct >= threshold)).join("");
+  target.innerHTML = `<div class="detail"><div class="report-meta" style="margin:0 0 4px">
+      ${esc(data.area)}<i>·</i>store ${esc(data.store_id)}<i>·</i>${data.products.length} variants</div>${rows}</div>`;
+}
+
+async function load() {
+  try {
+    state = await api("/api/state");
+    $("area").value = state.area || "";
+    const ready = state.telegram_ready && !state.dev_mode;
+    $("sub").innerHTML = `<span class="dot"></span><b>${esc(
+      state.dev_mode ? "Dev mode" : (state.telegram_ready ? "Connected" : "No bot token")
+    )}</b>`;
+    $("sub").classList.toggle("warn", !ready);
+    renderWatches();
+  } catch (e) {
+    $("sub").innerHTML = `<span class="dot"></span><b>Offline</b>`;
+    $("sub").classList.add("warn");
+    msg("area-msg", e.message);
+  }
+}
+
+async function saveWatches() {
+  const clean = state.watches.map(w => ({ ...w, name: w.name || w.query }));
+  await api("/api/watches", { method: "PUT", body: JSON.stringify({ watches: clean }) });
+}
+
+$("save-area").onclick = async (e) => {
+  const area = $("area").value.trim();
+  if (!area) return;
+  busy(e.target, true);
+  try {
+    await api("/api/settings", { method: "PUT", body: JSON.stringify({ area }) });
+    state.area = area;
+    msg("area-msg", "Saved — store will re-resolve on the next check.", "ok");
+    haptic();
+  } catch (err) { msg("area-msg", err.message); }
+  finally { busy(e.target, false); }
+};
+
+$("area").addEventListener("keydown", e => { if (e.key === "Enter") $("save-area").click(); });
+
+$("add").onclick = () => {
+  state.watches.push({
+    name: "", query: "", min_discount_pct: 50, categories: [],
+    include: [], exclude: [], max_price: null, in_stock_only: true, enabled: true,
+  });
+  openIdx = state.watches.length - 1;
+  renderWatches();
+  haptic();
+};
+
+$("watches").addEventListener("click", async (e) => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const i = +el.dataset.i;
+
+  if (el.dataset.act === "open") {
+    openIdx = openIdx === i ? -1 : i;
+    renderWatches();
+  } else if (el.dataset.act === "toggle") {
+    state.watches[i].enabled = el.checked;
+    el.closest(".watch").classList.toggle("off", !el.checked);
+    try { await saveWatches(); haptic(); } catch (err) { msg("watch-msg", err.message); }
+  } else if (el.dataset.act === "delete") {
+    state.watches.splice(i, 1);
+    openIdx = -1;
+    renderWatches();
+    try { await saveWatches(); haptic("medium"); } catch (err) { msg("watch-msg", err.message); }
+  } else if (el.dataset.act === "preview") {
+    const w = state.watches[i];
+    if (!w.query) { msg("watch-msg", "Set a search query first"); return; }
+    const out = document.querySelector(`[data-out="${i}"]`);
+    busy(el, true, "Fetching");
+    out.innerHTML = "";
+    try {
+      const data = await api(`/api/preview?query=${encodeURIComponent(w.query)}`);
+      renderProducts(out, data, w.min_discount_pct);
+      haptic();
+    } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+    finally { busy(el, false); }
+  }
+});
+
+$("watches").addEventListener("change", async (e) => {
+  const el = e.target.closest("[data-f]");
+  if (!el) return;
+  const i = +el.dataset.i, f = el.dataset.f, w = state.watches[i];
+
+  if (f === "categories" || f === "exclude") {
+    w[f] = el.value.split(",").map(s => s.trim()).filter(Boolean);
+  } else if (f === "min_discount_pct") {
+    w[f] = Math.max(0, Math.min(100, Number(el.value) || 0));
+    const pill = document.querySelector(`[data-pill="${i}"]`);
+    if (pill) pill.textContent = `≥ ${w[f]}%`;
+  } else if (f === "max_price") {
+    w[f] = el.value === "" ? null : Number(el.value);
+  } else {
+    w[f] = el.value.trim();
+  }
+
+  if (!w.query) return;
+  try { await saveWatches(); msg("watch-msg", "Saved", "ok"); setTimeout(() => msg("watch-msg", ""), 1200); }
+  catch (err) { msg("watch-msg", err.message); }
+});
+
+async function runCheck(dry, btn) {
+  busy(btn, true, dry ? "Checking" : "Sending");
+  msg("run-msg", "");
+  $("run-out").innerHTML = "";
+  try {
+    const data = await api("/api/check", { method: "POST", body: JSON.stringify({ dry_run: dry }) });
+    $("run-out").innerHTML = data.results.map(r => {
+      if (r.error) return `<div class="err">${esc(r.name)}: ${esc(r.error)}</div>`;
+      const hot = r.best >= r.threshold;
+      const hits = r.alerted.map(p => productRow(p, true)).join("");
+      return `<div class="report detail">
+          <div class="row"><span class="watch-name">${esc(r.name)}</span>
+          <span class="pill ${hot ? "hot" : ""} fixed">best ${r.best}% / ≥${r.threshold}%</span></div>
+          <div class="report-meta"><span>${r.tracked} tracked</span><i>·</i><span>${r.hits} over threshold</span><i>·</i><span>${
+            r.alerted.length ? (dry ? "would send" : "sent") : (r.hits ? "already alerted" : "nothing yet")
+          }</span></div>
+          ${hits}</div>`;
+    }).join("");
+    haptic("medium");
+  } catch (err) { msg("run-msg", err.message); }
+  finally { busy(btn, false); }
+}
+
+$("dry").onclick = e => runCheck(true, e.target);
+$("run").onclick = e => runCheck(false, e.target);
+
+load();
+</script>
+</body>
+</html>

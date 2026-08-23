@@ -1,0 +1,23 @@
+version: "3.8"
+services:
+  web:
+    build: .
+    command: uv run im serve --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    env_file: .env
+
+  bot:
+    build: .
+    command: uv run im bot
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - web
+
+  watch:
+    build: .
+    command: uv run im watch --every 15
+    restart: unless-stopped
+    env_file: .env
