@@ -80,9 +80,14 @@ class Watchlist:
 
     @classmethod
     def load(cls, path: Path) -> Watchlist:
-        raw: Any = json.loads(path.read_text())
-        entries = raw["watches"] if isinstance(raw, dict) else raw
-        return cls([Watch.from_dict(e) for e in entries])
+        if not path.exists():
+            return cls([])
+        try:
+            raw: Any = json.loads(path.read_text())
+            entries = raw["watches"] if isinstance(raw, dict) else raw
+            return cls([Watch.from_dict(e) for e in entries])
+        except (json.JSONDecodeError, OSError):
+            return cls([])
 
     def save(self, path: Path) -> None:
         """Write atomically — the web UI and a running poller can both read this."""
