@@ -1,4 +1,5 @@
 version: "3.8"
+
 services:
   web:
     build: .
@@ -7,17 +8,32 @@ services:
       - "8080:8080"
     restart: unless-stopped
     env_file: .env
+    environment:
+      - IM_WATCHLIST=/app/data/watchlist.json
+    volumes:
+      - data-volume:/app/data
 
   bot:
     build: .
     command: uv run im bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      - IM_WATCHLIST=/app/data/watchlist.json
     depends_on:
       - web
+    volumes:
+      - data-volume:/app/data
 
   watch:
     build: .
     command: uv run im watch --every 15
     restart: unless-stopped
     env_file: .env
+    environment:
+      - IM_WATCHLIST=/app/data/watchlist.json
+    volumes:
+      - data-volume:/app/data
+
+volumes:
+  data-volume:
