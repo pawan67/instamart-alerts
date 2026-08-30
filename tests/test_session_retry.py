@@ -6,12 +6,13 @@ import httpx
 import pytest
 
 from instamart_alerts import runner
-from instamart_alerts.config import Settings
+from instamart_alerts.config import API, Settings
 from instamart_alerts.session import (
     Blocked,
     SessionData,
     build_client,
     load_cached,
+    request,
     save_cached,
     sync_cookies,
 )
@@ -199,3 +200,51 @@ def test_a_block_then_a_connection_failure_both_recover(tmp_path, monkeypatch):
     # Re-mint after the block, then reuse that same token after the timeout.
     assert attempts == ["t1", "t2", "t2"]
     assert calls == [False, True]
+
+
+def _mock_client(status: int, body: bytes, content_type: str | None) -> httpx.Client:
+    headers = {} if content_type is None else {"content-type": content_type}
+    return httpx.Client(
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(status, content=body, headers=headers)
+        )
+    )
+
+
+CHALLENGE_PAGE = b"<!DOCTYPE html><html><head><title>Just a moment</title>"
+
+
+def test_a_challenge_served_as_200_html_counts_as_blocked():
+    """The WAF does not always use 202 — sometimes it just returns the page."""
+    client = _mock_client(200, CHALLENGE_PAGE, "text/html; charset=utf-8")
+    with pytest.raises(Blocked, match="not JSON"):
+        request(client, "POST", f"{API}/search/v2")
+
+
+def test_an_empty_body_counts_as_blocked():
+    client = _mock_client(200, b"", "application/json")
+    with pytest.raises(Blocked, match="not JSON"):
+        request(client, "GET", f"{API}/maps/suggestions")
+
+
+def test_a_missing_content_type_counts_as_blocked():
+    client = _mock_client(200, b'{"data": []}', None)
+    with pytest.raises(Blocked, match="missing"):
+        request(client, "GET", f"{API}/maps/suggestions")
+
+
+def test_real_json_passes_through():
+    client = _mock_client(200, b'{"data": [1]}', "application/json")
+    assert request(client, "GET", f"{API}/maps/suggestions").json() == {"data": [1]}
+
+
+def test_202_still_blocks_before_the_body_is_examined():
+    client = _mock_client(202, b'{"data": []}', "application/json")
+    with pytest.raises(Blocked, match="HTTP 202"):
+        request(client, "GET", f"{API}/maps/suggestions")
+
+
+def test_a_server_error_is_not_mistaken_for_a_challenge():
+    client = _mock_client(500, CHALLENGE_PAGE, "text/html")
+    with pytest.raises(httpx.HTTPStatusError):
+        request(client, "GET", f"{API}/maps/suggestions")

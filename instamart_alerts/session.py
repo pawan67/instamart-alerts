@@ -185,4 +185,16 @@ def request(client: httpx.Client, method: str, url: str, **kw: Any) -> httpx.Res
     if r.status_code in BLOCKED:
         raise Blocked(f"{method} {url.removeprefix(API)} -> HTTP {r.status_code}")
     r.raise_for_status()
+
+    # A challenge also turns up as a 200 wrapping an HTML interstitial, or as an
+    # empty body. Every endpoint here answers with JSON, so anything else is a
+    # block wearing a different hat. Catching it now means the caller fails loudly
+    # instead of much later on `.json()` — or, for select-location, on a regex
+    # that quietly finds no storeId in a page that never held one.
+    content_type = r.headers.get("content-type", "")
+    if "json" not in content_type.lower() or not r.content.strip():
+        raise Blocked(
+            f"{method} {url.removeprefix(API)} -> HTTP {r.status_code} "
+            f"with a {content_type or 'missing'} body, not JSON"
+        )
     return r
