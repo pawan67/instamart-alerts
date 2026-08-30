@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -10,11 +11,31 @@ import httpx
 from .config import Settings
 from .instamart import Product, ensure_location, search
 from .notify import format_alert, send
-from .session import Blocked, SessionData, build_client, load_cached, mint_token, save_cached
+from .session import (
+    Blocked,
+    SessionData,
+    build_client,
+    load_cached,
+    mint_token,
+    save_cached,
+    sync_cookies,
+)
 from .state import AlertState
 from .watchlist import Watch, Watchlist
 
 log = logging.getLogger(__name__)
+
+# A blocked pass usually just means a stale token, but the replacement is only
+# accepted about half the time — the WAF sometimes hands out a token it has
+# already decided to re-challenge. Each retry costs a ~30s browser bootstrap,
+# so the ladder stays short.
+MAX_ATTEMPTS = 3
+BACKOFF_SECONDS = (5.0, 20.0)
+
+# Anything that fails before Swiggy sees the request: a proxy that accepts the
+# connection then drops the TLS handshake, a timeout, a dead tunnel. Retryable
+# on the same session, since the token was never the problem.
+TRANSPORT_ERRORS = httpx.TransportError
 
 
 @dataclass
@@ -26,11 +47,25 @@ class WatchResult:
     error: str | None = None
 
 
-def open_session(settings: Settings, *, force_refresh: bool = False):
+def open_session(
+    settings: Settings,
+    *,
+    force_refresh: bool = False,
+    previous: SessionData | None = None,
+):
     """Return (client, session_data). Re-mints the WAF token when required."""
     data = None if force_refresh else load_cached(settings)
     if data is None or not data.cookies:
+        prior = previous or load_cached(settings)
         data = mint_token(settings)
+        # A new token does not invalidate the store lookup. Carrying it over
+        # keeps the fresh session from spending its first two calls — the ones
+        # most likely to be re-challenged — re-geocoding an area we resolved
+        # minutes ago.
+        if prior is not None and prior.store_id:
+            data.store_id = prior.store_id
+            data.area_label = prior.area_label
+            data.lat, data.lng = prior.lat, prior.lng
         save_cached(settings, data)
     return build_client(settings, data), data
 
@@ -42,18 +77,58 @@ def run_once(
     dry_run: bool = False,
     cooldown_hours: float = 24.0,
 ) -> list[WatchResult]:
-    client, data = open_session(settings)
+    client: httpx.Client | None = None
+    data: SessionData | None = None
+    failure: Exception | None = None
+
     try:
-        results = _run(settings, watchlist, client, data, dry_run, cooldown_hours)
-    except Blocked as e:
-        # Cached token went stale — mint a new one and retry once.
-        log.warning("session blocked (%s); re-minting", e)
-        client.close()
-        client, data = open_session(settings, force_refresh=True)
-        results = _run(settings, watchlist, client, data, dry_run, cooldown_hours)
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                if client is None:
+                    client, data = open_session(
+                        settings, force_refresh=attempt > 1, previous=data
+                    )
+                results = _run(
+                    settings, watchlist, client, data, dry_run, cooldown_hours
+                )
+            except (Blocked, TRANSPORT_ERRORS) as e:
+                failure = e
+                if isinstance(e, Blocked):
+                    # A refused token only improves by being replaced, so drop
+                    # the client and let the next attempt mint a new one.
+                    if client is not None:
+                        client.close()
+                    client = None
+                    what, action = "session blocked", "re-minting"
+                else:
+                    # The tunnel died before Swiggy saw us; the token is still
+                    # good. Keep the session and just redial.
+                    what, action = "connection failed", "reconnecting"
+                if attempt < MAX_ATTEMPTS:
+                    delay = BACKOFF_SECONDS[attempt - 1]
+                    log.warning(
+                        "%s (%s); %s in %.0fs [attempt %d/%d]",
+                        what,
+                        e,
+                        action,
+                        delay,
+                        attempt + 1,
+                        MAX_ATTEMPTS,
+                    )
+                    time.sleep(delay)
+                continue
+
+            # Swiggy rotates aws-waf-token as the session is used; keep the
+            # newest one so the next poll does not open on a retired token.
+            if sync_cookies(client, data):
+                save_cached(settings, data)
+            return results
     finally:
-        client.close()
-    return results
+        if client is not None:
+            client.close()
+
+    log.error("giving up after %d attempts (%s)", MAX_ATTEMPTS, failure)
+    raise failure
 
 
 def _run(

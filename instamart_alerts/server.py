@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from . import config
 from .instamart import ensure_location, search
 from .runner import open_session, run_once
-from .session import Blocked
+from .session import Blocked, save_cached, sync_cookies
 from .watchlist import Watch, Watchlist
 from .webauth import AuthError, verify
 
@@ -142,9 +142,13 @@ def create_app() -> FastAPI:
                     products = search(client, data.store_id, query)
                 except Blocked:
                     client.close()
-                    client, data = open_session(settings, force_refresh=True)
+                    client, data = open_session(
+                        settings, force_refresh=True, previous=data
+                    )
                     ensure_location(client, data, settings.area)
                     products = search(client, data.store_id, query)
+                if sync_cookies(client, data):
+                    save_cached(settings, data)
             except Exception as e:  # noqa: BLE001 — surfaced to the UI
                 log.exception("preview failed")
                 raise HTTPException(status_code=502, detail=str(e)) from None

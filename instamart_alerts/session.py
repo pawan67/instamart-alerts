@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 # token shows up as 403.
 BLOCKED = (202, 403)
 
+# Every API call goes to www.swiggy.com, and the browser hands us cookies scoped
+# to the parent domain, so we file them all under one key.
+COOKIE_DOMAIN = ".swiggy.com"
+
 
 class Blocked(RuntimeError):
     """Swiggy refused the request — the WAF token needs re-minting."""
@@ -143,13 +147,36 @@ def build_client(settings: Settings, data: SessionData) -> httpx.Client:
         "Origin": "https://www.swiggy.com",
         "Referer": "https://www.swiggy.com/instamart",
     }
+    # Pin every cookie to the Swiggy domain. Seeding httpx from a bare dict
+    # files them under an empty domain, so a `Set-Cookie` for `.swiggy.com`
+    # would land *beside* the old value rather than replacing it, leaving
+    # `sync_cookies` two `aws-waf-token`s to pick between.
+    jar = httpx.Cookies()
+    for name, value in data.cookies.items():
+        jar.set(name, value, domain=COOKIE_DOMAIN)
+
     return httpx.Client(
         headers=headers,
-        cookies=data.cookies,
+        cookies=jar,
         timeout=30.0,
         follow_redirects=True,
         proxy=settings.proxy,
     )
+
+
+def sync_cookies(client: httpx.Client, data: SessionData) -> bool:
+    """Fold the server's rotated cookies back onto `data`. True if any changed.
+
+    The WAF issues a replacement `aws-waf-token` as the session is used. Without
+    this the cache keeps replaying whatever the browser minted, which the server
+    has long retired by the next poll — so every pass would open on a token that
+    is already dead and pay for a fresh browser bootstrap.
+    """
+    merged = data.cookies | {c.name: c.value for c in client.cookies.jar}
+    if merged == data.cookies:
+        return False
+    data.cookies = merged
+    return True
 
 
 def request(client: httpx.Client, method: str, url: str, **kw: Any) -> httpx.Response:

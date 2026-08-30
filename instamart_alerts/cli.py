@@ -19,7 +19,7 @@ from . import config
 from .notify import send
 from .runner import open_session, run_once
 from .instamart import ensure_location, search
-from .session import Blocked
+from .session import Blocked, save_cached, sync_cookies
 from .watchlist import Watchlist
 
 
@@ -77,9 +77,11 @@ def cmd_list(args: argparse.Namespace) -> int:
             products = search(client, data.store_id, args.query)
         except Blocked:
             client.close()
-            client, data = open_session(settings, force_refresh=True)
+            client, data = open_session(settings, force_refresh=True, previous=data)
             ensure_location(client, data, settings.area)
             products = search(client, data.store_id, args.query)
+        if sync_cookies(client, data):
+            save_cached(settings, data)
     finally:
         client.close()
 
