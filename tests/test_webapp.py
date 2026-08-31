@@ -466,3 +466,99 @@ def test_a_junk_mode_in_the_environment_falls_back_to_auto(client, monkeypatch):
     """A typo in IM_TRANSPORT must not stop the poller dead."""
     monkeypatch.setenv("IM_TRANSPORT", "htpp")
     assert config.load().transport == "auto"
+
+
+# ── run summaries carry the tracked breakdown ────────────────────────
+def _product(name, discount, price=100.0, sku="s1", in_stock=True):
+    from instamart_alerts.instamart import Product
+
+    return Product(
+        sku_id=sku,
+        product_id=f"p-{sku}",
+        name=name,
+        brand="B",
+        quantity="6 Pieces",
+        category="Eggs",
+        sub_category="Eggs",
+        mrp=price * 2,
+        price=price,
+        discount_pct=discount,
+        in_stock=in_stock,
+        unit_price="",
+        offer_label="",
+    )
+
+
+def _result(candidates, alerted=(), threshold=50.0):
+    from instamart_alerts.runner import WatchResult
+    from instamart_alerts.watchlist import Watch
+
+    watch = Watch(name="Eggs", query="eggs", min_discount_pct=threshold)
+    hits = [p for p in candidates if p.discount_pct >= threshold]
+    return WatchResult(watch, list(candidates), hits, list(alerted))
+
+
+def test_a_run_reports_every_tracked_candidate_best_first():
+    from instamart_alerts.scheduler import summarise
+
+    products = [
+        _product("low", 10.0, sku="a"),
+        _product("high", 60.0, sku="b"),
+        _product("mid", 35.0, sku="c"),
+    ]
+    [row] = summarise([_result(products)])
+
+    assert row["tracked"] == 3
+    assert [p["discount_pct"] for p in row["tracked_items"]] == [60.0, 35.0, 10.0]
+    assert row["tracked_omitted"] == 0
+
+
+def test_each_tracked_item_says_whether_it_beat_the_threshold():
+    from instamart_alerts.scheduler import summarise
+
+    [row] = summarise(
+        [_result([_product("over", 60.0, sku="a"), _product("under", 20.0, sku="b")])]
+    )
+    assert [p["hit"] for p in row["tracked_items"]] == [True, False]
+
+
+def test_a_tracked_item_is_marked_when_it_was_actually_sent():
+    from instamart_alerts.scheduler import summarise
+
+    sent = _product("sent", 60.0, sku="a")
+    quiet = _product("deduped", 55.0, sku="b")
+    [row] = summarise([_result([sent, quiet], alerted=[sent])])
+
+    by_sku = {p["name"]: p for p in row["tracked_items"]}
+    assert by_sku["sent"]["alerted"] is True
+    # Over the threshold but held back by de-duplication.
+    assert by_sku["deduped"]["hit"] is True
+    assert by_sku["deduped"]["alerted"] is False
+
+
+def test_a_long_candidate_list_is_capped_and_says_so():
+    from instamart_alerts.scheduler import MAX_TRACKED_REPORTED, summarise
+
+    many = [_product(f"p{i}", float(i % 90), sku=f"s{i}") for i in range(120)]
+    [row] = summarise([_result(many)])
+
+    assert row["tracked"] == 120
+    assert len(row["tracked_items"]) == MAX_TRACKED_REPORTED
+    assert row["tracked_omitted"] == 120 - MAX_TRACKED_REPORTED
+    # The cap keeps the best, not an arbitrary slice.
+    assert row["tracked_items"][0]["discount_pct"] == max(p.discount_pct for p in many)
+
+
+def test_out_of_stock_survives_into_the_breakdown():
+    from instamart_alerts.scheduler import summarise
+
+    [row] = summarise([_result([_product("gone", 70.0, in_stock=False)])])
+    assert row["tracked_items"][0]["in_stock"] is False
+
+
+def test_a_watch_that_matched_nothing_reports_an_empty_breakdown():
+    from instamart_alerts.scheduler import summarise
+
+    [row] = summarise([_result([])])
+    assert row["tracked_items"] == []
+    assert row["best"] == 0.0

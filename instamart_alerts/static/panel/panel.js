@@ -341,14 +341,20 @@ function renderRun(event, opts = {}) {
   }
 
   const rows = (event.results || [])
-    .map((r) => {
+    .map((r, i) => {
       const hit = r.best >= r.threshold;
+      const id = `${event.seq}-${i}`;
+      const breakdown = (r.tracked_items || []).length
+        ? `<button class="rrow__more" type="button" data-track="${id}" aria-expanded="false">` +
+          `${r.tracked} tracked</button>`
+        : `<span class="rrow__num">${r.tracked} tracked</span>`;
       const head =
         `<div class="rrow">` +
         `<span class="rrow__name">${esc(r.name)}</span>` +
-        `<span class="rrow__num">${r.tracked} tracked · ${r.hits} over ${nf(r.threshold)}%</span>` +
+        `<span class="rrow__num">${breakdown} · ${r.hits} over ${nf(r.threshold)}%</span>` +
         `<span class="rrow__best ${hit ? "is-hit" : ""}">best ${nf(r.best)}%</span>` +
-        `</div>`;
+        `</div>` +
+        `<div class="tracklist" id="track-${id}" hidden>${trackList(r)}</div>`;
       const err = r.error
         ? `<div class="rhit">error: ${esc(r.error)}</div>`
         : "";
@@ -374,6 +380,102 @@ function renderRun(event, opts = {}) {
   if (!opts.replayed && !event.dry_run && alerted) {
     toast(`${alerted} alert${alerted === 1 ? "" : "s"} sent to Telegram`, "good");
   }
+}
+
+/** What is on screen, as plain text — the level and search filters apply. */
+function consoleText() {
+  return [...body().children]
+    .filter((el) => el.id !== "log-empty" && !el.hidden)
+    .map((el) => (el.classList.contains("runblock") ? runText(el) : lineText(el)))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function lineText(el) {
+  const at = $(".line__t", el)?.textContent ?? "";
+  const level = $(".line__l", el)?.textContent ?? "";
+  const message = $(".line__m", el)?.textContent ?? "";
+  return `${at}  ${level.padEnd(5)} ${message}`.trimEnd();
+}
+
+function runText(el) {
+  const head = $(".runblock__head", el);
+  const out = head ? [`— ${tidy(head.textContent)} —`] : [];
+  for (const row of $$(".rrow, .rhit, .trow, .tracklist__note", el)) {
+    // A collapsed breakdown is not on screen, so it is not in the copy.
+    if (row.closest(".tracklist")?.hidden) continue;
+    const indent = row.classList.contains("rrow") ? "  " : "    ";
+    out.push(indent + rowText(row));
+  }
+  return out.join("\n");
+}
+
+/**
+ * Grid rows are laid out with CSS, so their cells have no separator in the
+ * text — "36.1%₹297 ₹465Fresh Eggs" — and need one put back. Rows with loose
+ * text nodes between elements (a hit line, say) would lose that text if we
+ * walked children, so those are taken whole.
+ */
+function rowText(row) {
+  const grid = row.classList.contains("rrow") || row.classList.contains("trow");
+  if (!grid) return tidy(row.textContent);
+
+  const cells = [...row.children].map((c) => tidy(c.textContent));
+  if (!row.classList.contains("trow")) return cells.filter(Boolean).join("  ");
+  // Discount and price are columns worth keeping aligned when pasted.
+  const [pct = "", price = "", name = ""] = cells;
+  return `${pct.padStart(6)}  ${price.padStart(13)}  ${name}`;
+}
+
+const tidy = (s) => s.replace(/\s+/g, " ").trim();
+
+/**
+ * Copy, with a fallback: navigator.clipboard needs a secure context, and a
+ * panel reached over plain HTTP on a LAN address does not have one.
+ */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      /* fall through to the old trick */
+    }
+  }
+  try {
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.setAttribute("readonly", "");
+    scratch.style.cssText = "position:fixed;top:-1000px;opacity:0";
+    document.body.appendChild(scratch);
+    scratch.select();
+    const ok = document.execCommand("copy");
+    scratch.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Every candidate the watch kept, best discount first. */
+function trackList(result) {
+  const rows = (result.tracked_items || [])
+    .map(
+      (p) =>
+        `<div class="trow ${p.hit ? "is-hit" : ""} ${p.in_stock === false ? "is-out" : ""}">` +
+        `<span class="trow__pct">${nf(p.discount_pct)}%</span>` +
+        `<span class="trow__price">₹${nf(p.price)} <s>₹${nf(p.mrp)}</s></span>` +
+        `<span class="trow__name"><a href="${esc(p.url)}" target="_blank" rel="noreferrer">` +
+        `${esc(p.name)}</a> ${esc(p.quantity || "")}` +
+        `${p.alerted ? ' <span class="trow__flag">· sent</span>' : ""}` +
+        `${p.in_stock === false ? " · out of stock" : ""}</span>` +
+        `</div>`
+    )
+    .join("");
+  const omitted = result.tracked_omitted
+    ? `<div class="tracklist__note">…and ${result.tracked_omitted} more below this</div>`
+    : "";
+  return rows + omitted;
 }
 
 function scrollConsole(force = false) {
@@ -862,6 +964,15 @@ function wire() {
     e.target.dataset.on = state.follow ? "1" : "";
     scrollConsole();
   };
+  body().addEventListener("click", (e) => {
+    const btn = e.target.closest(".rrow__more");
+    if (!btn) return;
+    const list = $(`#track-${btn.dataset.track}`);
+    if (!list) return;
+    list.hidden = !list.hidden;
+    btn.setAttribute("aria-expanded", String(!list.hidden));
+  });
+
   body().addEventListener("scroll", () => {
     const atBottom =
       body().scrollHeight - body().scrollTop - body().clientHeight < 40;
@@ -876,10 +987,19 @@ function wire() {
     state.logs = 0;
     $("#log-count").textContent = "0 lines";
   };
+  $("#btn-copy").onclick = async (e) => {
+    const text = consoleText();
+    if (!text) return toast("Nothing on screen to copy.", "bad");
+    const ok = await copyText(text);
+    const lines = text.split("\n").length;
+    toast(
+      ok ? `Copied ${lines} line${lines === 1 ? "" : "s"}.` : "Could not reach the clipboard.",
+      ok ? "good" : "bad"
+    );
+  };
+
   $("#btn-download").onclick = () => {
-    const text = $$(".line", body())
-      .map((el) => el.textContent.replace(/\s+/g, " ").trim())
-      .join("\n");
+    const text = consoleText();
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     const a = document.createElement("a");
     a.href = url;

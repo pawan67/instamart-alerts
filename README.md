@@ -40,9 +40,17 @@ tells you how many survive your filters:
 ![Editing a watch, with live prices](docs/watches.png)
 
 The console is the whole log of the process, streamed live, filterable by level
-or text, with finished runs pinned in as result blocks. It survives a restart:
+or text, with finished runs pinned in as result blocks. Every run's summary line
+opens into the full breakdown — every product the watch kept, best discount
+first, with the ones over your threshold picked out and the ones actually sent
+flagged. That is how you tell "nothing was on offer" from "my threshold is too
+high":
 
 ![The console](docs/console.png)
+
+`copy` puts what is on screen on the clipboard and `save` writes it to a file —
+both respect the filters, and both keep the columns lined up, so a run pastes
+into an issue or a chat readably. History survives a restart.
 
 ## How it works
 
@@ -175,8 +183,9 @@ From it you can:
   panel running as the scheduler.
 - **set the fetch mode, proxy and Swiggy build version** — the things you reach
   for when Instamart starts refusing the calls, all without a redeploy.
-- **read every log line the process emits**, live. History survives a restart in
-  `data/console.log`.
+- **read every log line the process emits**, live, and expand any run into the
+  full list of what it tracked. Copy or download what is on screen. History
+  survives a restart in `data/console.log`.
 
 Anything saved lands in `data/settings.json`, which is layered over `.env`.
 

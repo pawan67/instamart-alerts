@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import config, logbus
+from .instamart import Product
 from .runner import WatchResult, run_once
 from .watchlist import Watchlist
 
@@ -25,30 +26,56 @@ log = logging.getLogger("scheduler")
 TICK_SECONDS = 1.0
 
 
+# How many tracked products travel with a run event. The whole candidate list is
+# what makes a run reviewable — "best 36.1%" tells you nothing about the shape of
+# the spread below it — but the events are kept in memory and replayed to every
+# tab, so the tail of a large search is summarised rather than carried.
+MAX_TRACKED_REPORTED = 40
+
+
+def _item(p: Product, threshold: float) -> dict[str, Any]:
+    return {
+        "name": p.name,
+        "quantity": p.quantity,
+        "price": p.price,
+        "mrp": p.mrp,
+        "discount_pct": p.discount_pct,
+        "url": p.url,
+        "in_stock": p.in_stock,
+        "hit": p.discount_pct >= threshold,
+    }
+
+
 def summarise(results: list[WatchResult]) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": r.watch.name,
-            "query": r.watch.query,
-            "threshold": r.watch.min_discount_pct,
-            "tracked": len(r.candidates),
-            "best": round(max((p.discount_pct for p in r.candidates), default=0.0), 1),
-            "hits": len(r.hits),
-            "error": r.error,
-            "alerted": [
-                {
-                    "name": p.name,
-                    "quantity": p.quantity,
-                    "price": p.price,
-                    "mrp": p.mrp,
-                    "discount_pct": p.discount_pct,
-                    "url": p.url,
-                }
-                for p in sorted(r.alerted, key=lambda x: -x.discount_pct)
-            ],
-        }
-        for r in results
-    ]
+    out = []
+    for r in results:
+        threshold = r.watch.min_discount_pct
+        ranked = sorted(r.candidates, key=lambda x: -x.discount_pct)
+        alerted_skus = {p.sku_id for p in r.alerted}
+        out.append(
+            {
+                "name": r.watch.name,
+                "query": r.watch.query,
+                "threshold": threshold,
+                "tracked": len(r.candidates),
+                "best": round(max((p.discount_pct for p in ranked), default=0.0), 1),
+                "hits": len(r.hits),
+                "error": r.error,
+                "alerted": [
+                    _item(p, threshold)
+                    for p in sorted(r.alerted, key=lambda x: -x.discount_pct)
+                ],
+                # Everything that passed the filters, best discount first, so a
+                # run can be read as "how close did we get" and not just
+                # "did anything fire".
+                "tracked_items": [
+                    _item(p, threshold) | {"alerted": p.sku_id in alerted_skus}
+                    for p in ranked[:MAX_TRACKED_REPORTED]
+                ],
+                "tracked_omitted": max(0, len(ranked) - MAX_TRACKED_REPORTED),
+            }
+        )
+    return out
 
 
 @dataclass
