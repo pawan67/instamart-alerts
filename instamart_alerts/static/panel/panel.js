@@ -153,6 +153,7 @@ function applySnapshot(data) {
   $("#in-build").value = s.build_version || "";
   $("#in-build").placeholder = s.build_version_default || "2.367.0";
   $("#in-bootstrap").value = s.bootstrap_seconds ?? 30;
+  $("#in-transport").value = s.transport || "auto";
 
   const fail = data.bootstrap_failure;
   $("#boot-fail").hidden = !fail;
@@ -787,6 +788,7 @@ function wire() {
               proxy: $("#in-proxy").value,
               build_version: $("#in-build").value,
               bootstrap_seconds: Number($("#in-bootstrap").value) || undefined,
+              transport: $("#in-transport").value,
             },
           })
         );

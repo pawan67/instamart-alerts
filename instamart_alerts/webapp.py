@@ -157,6 +157,7 @@ class SettingsIn(BaseModel):
     cooldown_hours: float | None = Field(default=None, ge=0, le=8760)
     build_version: str | None = Field(default=None, max_length=32)
     bootstrap_seconds: int | None = Field(default=None, ge=5, le=180)
+    transport: str | None = None
 
 
 class PollerIn(BaseModel):
@@ -254,6 +255,8 @@ def _snapshot(settings: config.Settings) -> dict[str, Any]:
             "build_version": settings.build_version,
             "build_version_default": config.BUILD_VERSION,
             "bootstrap_seconds": settings.bootstrap_seconds,
+            "transport": settings.transport,
+            "transports": list(config.TRANSPORTS),
             "telegram_ready": settings.configured,
         },
         # Set outside the panel, shown so it is obvious what it cannot change.
@@ -379,6 +382,15 @@ def create_app() -> FastAPI:
                 )
             changes["proxy"] = proxy
             touched.append("proxy" if proxy else "proxy (cleared)")
+        if body.transport is not None:
+            mode = body.transport.strip().lower()
+            if mode not in config.TRANSPORTS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"fetch mode must be one of {', '.join(config.TRANSPORTS)}",
+                )
+            changes["transport"] = mode
+            touched.append(f"fetch mode ({mode})")
         if body.bootstrap_seconds is not None:
             changes["bootstrap_seconds"] = int(body.bootstrap_seconds)
             touched.append("bootstrap wait")
@@ -526,9 +538,14 @@ def create_app() -> FastAPI:
                     ensure_location(client, data, settings.area)
                     products = search(client, data.store_id, query)
                 except Blocked:
+                    # Same ladder as a real poll: one cheap retry, then stop
+                    # guessing and go through the browser.
                     client.close()
                     client, data = open_session(
-                        settings, force_refresh=True, previous=data
+                        settings,
+                        force_refresh=True,
+                        previous=data,
+                        browser=settings.transport != "http",
                     )
                     ensure_location(client, data, settings.area)
                     products = search(client, data.store_id, query)

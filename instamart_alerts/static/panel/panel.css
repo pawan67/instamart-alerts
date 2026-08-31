@@ -278,6 +278,17 @@ a.field__aside:hover { text-decoration: underline; }
 .input--mono { font-family: var(--mono); font-size: 13px; letter-spacing: .01em; }
 input[type="number"].input { -moz-appearance: textfield; }
 
+select.input {
+  appearance: none; cursor: pointer; padding-right: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+    linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select.input option { background: var(--panel-2); color: var(--ink); }
+
 .input-wrap { position: relative; display: flex; }
 .input-wrap .input { padding-right: 68px; }
 .input-wrap .ghost-btn { position: absolute; right: 4px; top: 4px; bottom: 4px; }

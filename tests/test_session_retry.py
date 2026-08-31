@@ -18,7 +18,7 @@ from instamart_alerts.session import (
 )
 
 
-def _settings(tmp_path) -> Settings:
+def _settings(tmp_path, *, transport: str = "http") -> Settings:
     return Settings(
         bot_token="t",
         chat_id="c",
@@ -27,6 +27,7 @@ def _settings(tmp_path) -> Settings:
         data_dir=tmp_path,
         watchlist_path=tmp_path / "watchlist.json",
         headless=True,
+        transport=transport,
     )
 
 
@@ -93,19 +94,21 @@ def test_remint_keeps_the_store_lookup(tmp_path, monkeypatch):
 def _stub_session(monkeypatch, tmp_path):
     """Make open_session cheap; return the list recording each call."""
     calls: list[bool] = []
+    transports: list[str] = []
 
-    def fake_open(settings, *, force_refresh=False, previous=None):
+    def fake_open(settings, *, force_refresh=False, previous=None, browser=False):
         calls.append(force_refresh)
+        transports.append("browser" if browser else "http")
         data = SessionData(cookies={"aws-waf-token": f"t{len(calls)}"}, device_id="d")
         return build_client(_settings(tmp_path), data), data
 
     monkeypatch.setattr(runner, "open_session", fake_open)
     monkeypatch.setattr(runner.time, "sleep", lambda _: None)
-    return calls
+    return calls, transports
 
 
 def test_retries_until_a_token_sticks(tmp_path, monkeypatch):
-    calls = _stub_session(monkeypatch, tmp_path)
+    calls, transports = _stub_session(monkeypatch, tmp_path)
     attempts = []
 
     def fake_run(settings, watchlist, client, data, dry_run, cooldown_hours):
@@ -122,7 +125,7 @@ def test_retries_until_a_token_sticks(tmp_path, monkeypatch):
 
 
 def test_gives_up_after_the_ladder_and_reraises(tmp_path, monkeypatch):
-    _stub_session(monkeypatch, tmp_path)
+    calls, transports = _stub_session(monkeypatch, tmp_path)
 
     def always_blocked(*a, **kw):
         raise Blocked("POST /search/v2 -> HTTP 202")
@@ -137,7 +140,7 @@ def test_a_failed_mint_is_retried_too(tmp_path, monkeypatch):
     monkeypatch.setattr(runner.time, "sleep", lambda _: None)
     calls: list[bool] = []
 
-    def flaky_open(settings, *, force_refresh=False, previous=None):
+    def flaky_open(settings, *, force_refresh=False, previous=None, browser=False):
         calls.append(force_refresh)
         if len(calls) == 1:
             raise Blocked("browser bootstrap finished without an aws-waf-token")
@@ -152,7 +155,7 @@ def test_a_failed_mint_is_retried_too(tmp_path, monkeypatch):
 
 
 def test_connection_failure_retries_without_re_minting(tmp_path, monkeypatch):
-    calls = _stub_session(monkeypatch, tmp_path)
+    calls, transports = _stub_session(monkeypatch, tmp_path)
     attempts = []
 
     def fake_run(settings, watchlist, client, data, dry_run, cooldown_hours):
@@ -171,7 +174,7 @@ def test_connection_failure_retries_without_re_minting(tmp_path, monkeypatch):
 
 
 def test_connection_failure_gives_up_after_the_ladder(tmp_path, monkeypatch):
-    _stub_session(monkeypatch, tmp_path)
+    calls, transports = _stub_session(monkeypatch, tmp_path)
 
     def always_broken(*a, **kw):
         raise httpx.ConnectError("[SSL: UNEXPECTED_MESSAGE] unexpected message")
@@ -183,7 +186,7 @@ def test_connection_failure_gives_up_after_the_ladder(tmp_path, monkeypatch):
 
 
 def test_a_block_then_a_connection_failure_both_recover(tmp_path, monkeypatch):
-    calls = _stub_session(monkeypatch, tmp_path)
+    calls, transports = _stub_session(monkeypatch, tmp_path)
     attempts = []
 
     def fake_run(settings, watchlist, client, data, dry_run, cooldown_hours):
@@ -248,3 +251,54 @@ def test_a_server_error_is_not_mistaken_for_a_challenge():
     client = _mock_client(500, CHALLENGE_PAGE, "text/html")
     with pytest.raises(httpx.HTTPStatusError):
         request(client, "GET", f"{API}/maps/suggestions")
+
+
+# ── transport escalation ─────────────────────────────────────────────
+def test_auto_spends_the_cheap_attempts_before_the_browser(tmp_path, monkeypatch):
+    """A Chromium per pass is expensive; it is the last roll, not the first."""
+    calls, transports = _stub_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        runner, "_run", lambda *a: (_ for _ in ()).throw(Blocked("HTTP 202"))
+    )
+    with pytest.raises(Blocked):
+        runner.run_once(_settings(tmp_path, transport="auto"), object())
+    assert transports == ["http", "http", "browser"]
+
+
+def test_browser_mode_skips_httpx_entirely(tmp_path, monkeypatch):
+    calls, transports = _stub_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_run", lambda *a: ["ok"])
+    runner.run_once(_settings(tmp_path, transport="browser"), object())
+    assert transports == ["browser"]
+
+
+def test_http_mode_never_reaches_for_the_browser(tmp_path, monkeypatch):
+    calls, transports = _stub_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        runner, "_run", lambda *a: (_ for _ in ()).throw(Blocked("HTTP 202"))
+    )
+    with pytest.raises(Blocked):
+        runner.run_once(_settings(tmp_path, transport="http"), object())
+    assert transports == ["http", "http", "http"]
+
+
+def test_auto_does_not_pay_for_a_browser_when_the_first_try_works(tmp_path, monkeypatch):
+    calls, transports = _stub_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_run", lambda *a: ["ok"])
+    runner.run_once(_settings(tmp_path, transport="auto"), object())
+    assert transports == ["http"]
+
+
+@pytest.mark.parametrize(
+    "transport, attempt, expected",
+    [
+        ("auto", 1, False),
+        ("auto", 2, False),
+        ("auto", 3, True),
+        ("http", 3, False),
+        ("browser", 1, True),
+    ],
+)
+def test_use_browser_on(tmp_path, transport, attempt, expected):
+    s = _settings(tmp_path, transport=transport)
+    assert runner.use_browser_on(attempt, s) is expected

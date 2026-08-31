@@ -36,6 +36,14 @@ DEFAULT_COOLDOWN_HOURS = 24.0
 # VPS is much slower at this than a laptop.
 DEFAULT_BOOTSTRAP_SECONDS = 30
 
+# How Instamart calls leave the machine.
+#   http    — hand the browser's token to httpx. One second a poll.
+#   browser — issue every call from inside the page that solved the challenge.
+#             Slow (a Chromium per pass) but the fingerprint matches the token.
+#   auto    — http, falling back to browser on the last retry.
+TRANSPORTS = ("auto", "http", "browser")
+DEFAULT_TRANSPORT = "auto"
+
 # Recipients are stored as one string so `.env`, `settings.json` and the panel
 # all speak the same format. Commas, spaces and newlines all separate.
 _SEPARATORS = re.compile(r"[,;\s]+")
@@ -68,6 +76,7 @@ class Settings:
     poll_enabled: bool = False
     build_version: str = BUILD_VERSION
     bootstrap_seconds: int = DEFAULT_BOOTSTRAP_SECONDS
+    transport: str = DEFAULT_TRANSPORT
 
     @property
     def chat_ids(self) -> tuple[str, ...]:
@@ -148,6 +157,11 @@ def load() -> Settings:
         ),
         poll_enabled=bool(over.get("poll_enabled", False)),
         build_version=pick("build_version", "IM_BUILD_VERSION") or BUILD_VERSION,
+        transport=(
+            pick("transport", "IM_TRANSPORT").lower()
+            if pick("transport", "IM_TRANSPORT").lower() in TRANSPORTS
+            else DEFAULT_TRANSPORT
+        ),
         bootstrap_seconds=max(
             5,
             min(

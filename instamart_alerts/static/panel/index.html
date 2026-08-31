@@ -185,6 +185,16 @@
         </div>
         <div class="card__body">
           <label class="field">
+            <span class="field__label">Fetch mode <span class="field__aside">how calls leave the machine</span></span>
+            <select class="input" id="in-transport">
+              <option value="auto">Auto — HTTP, falling back to the browser</option>
+              <option value="http">HTTP only — one second a poll, needs a trusted IP</option>
+              <option value="browser">Browser only — slow, survives a strict WAF</option>
+            </select>
+          </label>
+          <p class="note note--tight">The fast path hands the browser's token to a plain HTTP client, whose TLS fingerprint does not match Chromium's. A strict WAF notices and answers 202 on a token it just issued. Browser mode keeps every call inside the page that solved the challenge — about 5s a pass instead of 1s.</p>
+
+          <label class="field">
             <span class="field__label">Proxy <span class="field__aside">routes the browser bootstrap and the polls</span></span>
             <input class="input input--mono" id="in-proxy" spellcheck="false" placeholder="socks5://user:pass@host:1080">
           </label>

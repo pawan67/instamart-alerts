@@ -313,6 +313,30 @@ systemd timer, cron, or leave `uv run im watch` running. For cron:
 */15 * * * * cd /mnt/newvolume/Projects/personal/instamart-alerts && uv run im check >> data/cron.log 2>&1
 ```
 
+## Fetch mode
+
+The cheap path hands the browser's `aws-waf-token` to `httpx` and every poll
+after the bootstrap costs about a second. That works until the WAF starts
+checking more than the cookie — the TLS handshake and header order are the other
+half of what it fingerprints, and `httpx`'s do not look like Chromium's. On a
+home connection the mismatch is tolerated. On a datacenter IP it often is not,
+and the symptom is unmistakable: a token minted seconds ago answered `202` on
+its very first use.
+
+**Browser mode** removes the mismatch. Calls go out as `fetch()` from inside the
+page that solved the challenge, so the fingerprint, the cookies and the JS
+environment are all the ones the token was issued to.
+
+| Mode | What it does | Cost |
+| --- | --- | --- |
+| `auto` (default) | httpx first, browser on the last retry | 1s normally |
+| `http` | never opens a browser to fetch | 1s |
+| `browser` | every call from inside the page | ~5s a pass |
+
+Set it under **Connection** in the panel, or `IM_TRANSPORT=browser` in the
+environment. `auto` means a healthy install pays nothing for the fallback and a
+blocked one still gets its results.
+
 ## When the bootstrap fails
 
 `no aws-waf-token: …` means headless Chromium loaded the page but the WAF never

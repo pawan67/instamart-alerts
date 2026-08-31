@@ -13,6 +13,7 @@ from .instamart import Product, ensure_location, search
 from .notify import format_alert, send
 from .session import (
     Blocked,
+    BrowserClient,
     SessionData,
     build_client,
     load_cached,
@@ -52,9 +53,30 @@ def open_session(
     *,
     force_refresh: bool = False,
     previous: SessionData | None = None,
+    browser: bool = False,
 ):
-    """Return (client, session_data). Re-mints the WAF token when required."""
+    """Return (client, session_data). Re-mints the WAF token when required.
+
+    With `browser=True` the client issues its calls from inside Chromium instead
+    of over httpx — slower, but the only thing that works when the WAF is
+    checking more than the cookie.
+    """
     data = None if force_refresh else load_cached(settings)
+
+    if browser:
+        # The browser client mints its own token as a side effect of opening,
+        # so there is nothing to bootstrap separately.
+        prior = data if data is not None else (previous or load_cached(settings))
+        session = SessionData() if data is None else data
+        if prior is not None and prior.store_id:
+            session.store_id = prior.store_id
+            session.area_label = prior.area_label
+            session.lat, session.lng = prior.lat, prior.lng
+        client = BrowserClient(settings, session)
+        data = client.open()
+        save_cached(settings, data)
+        return client, data
+
     if data is None or not data.cookies:
         prior = previous or load_cached(settings)
         data = mint_token(settings)
@@ -68,6 +90,16 @@ def open_session(
             data.lat, data.lng = prior.lat, prior.lng
         save_cached(settings, data)
     return build_client(settings, data), data
+
+
+def use_browser_on(attempt: int, settings: Settings) -> bool:
+    """Which transport attempt `attempt` should use."""
+    if settings.transport == "browser":
+        return True
+    if settings.transport == "http":
+        return False
+    # auto: spend the cheap attempts on httpx, then stop guessing.
+    return attempt >= MAX_ATTEMPTS
 
 
 def run_once(
@@ -85,8 +117,14 @@ def run_once(
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 if client is None:
+                    browser = use_browser_on(attempt, settings)
+                    if browser and attempt > 1:
+                        log.info("retrying through the browser transport")
                     client, data = open_session(
-                        settings, force_refresh=attempt > 1, previous=data
+                        settings,
+                        force_refresh=attempt > 1,
+                        previous=data,
+                        browser=browser,
                     )
                 results = _run(
                     settings, watchlist, client, data, dry_run, cooldown_hours

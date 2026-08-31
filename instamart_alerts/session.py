@@ -9,6 +9,7 @@ The token is cached on disk and only re-minted when Swiggy starts refusing us.
 from __future__ import annotations
 
 import json
+import json as _json
 import logging
 import os
 import time
@@ -125,14 +126,8 @@ def _diagnose(html: str, cookies: dict[str, str]) -> str:
     )
 
 
-def mint_token(settings: Settings) -> SessionData:
-    """Launch headless Chromium, clear the WAF challenge, keep the cookies."""
-    from playwright.sync_api import sync_playwright  # imported lazily: slow
-
-    log.info(
-        "minting a fresh WAF token via headless Chromium (up to %ds)",
-        settings.bootstrap_seconds,
-    )
+def _launch_options(settings: Settings) -> dict[str, Any]:
+    """Chromium launch arguments, shared by minting and the browser transport."""
     args = ["--disable-blink-features=AutomationControlled"]
     if os.geteuid() == 0:
         # Chromium's sandbox needs privileges root does not get in a container.
@@ -149,7 +144,29 @@ def mint_token(settings: Settings) -> SessionData:
             }
         else:
             launch["proxy"] = {"server": settings.proxy}
-        log.info("bootstrap is going out through %s", parsed.hostname or "the proxy")
+    return launch
+
+
+def _context_options() -> dict[str, Any]:
+    return {
+        "user_agent": USER_AGENT,
+        "viewport": {"width": 1440, "height": 900},
+        "locale": "en-IN",
+        "timezone_id": "Asia/Kolkata",
+    }
+
+
+def mint_token(settings: Settings) -> SessionData:
+    """Launch headless Chromium, clear the WAF challenge, keep the cookies."""
+    from playwright.sync_api import sync_playwright  # imported lazily: slow
+
+    log.info(
+        "minting a fresh WAF token via headless Chromium (up to %ds)",
+        settings.bootstrap_seconds,
+    )
+    launch = _launch_options(settings)
+    if settings.proxy:
+        log.info("bootstrap is going out through the proxy")
 
     status: int | None = None
     html = ""
@@ -157,12 +174,7 @@ def mint_token(settings: Settings) -> SessionData:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch)
-        ctx = browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1440, "height": 900},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-        )
+        ctx = browser.new_context(**_context_options())
         page = ctx.new_page()
         response = page.goto(
             "https://www.swiggy.com/instamart",
@@ -219,6 +231,253 @@ def _save_failure(settings: Settings, html: str, shot: bytes | None) -> None:
             )
     except OSError as e:
         log.warning("could not save bootstrap diagnostics: %s", e)
+
+# ── browser transport ────────────────────────────────────────────────
+#
+# The cheap path hands the browser's `aws-waf-token` to httpx. That works right
+# up until the WAF stops trusting the caller, because the cookie is only half of
+# what it checks — the TLS handshake and header order are the other half, and
+# httpx's do not look like Chromium's. On a residential IP the mismatch is
+# tolerated; on a datacenter IP it routinely is not, which shows up as a freshly
+# minted token being answered `202` on its very first use.
+#
+# This transport removes the mismatch by never leaving the browser: calls go out
+# as `fetch()` from the page that solved the challenge, so the fingerprint, the
+# cookies and the JS environment are all the ones the token was issued to. It is
+# far slower — a Chromium per pass rather than a one-second HTTP call — so it is
+# the fallback, not the default.
+
+# The page can navigate under us (SPA routing, or the challenge reloading it),
+# which destroys the execution context the fetch was running in.
+EVAL_ATTEMPTS = 4
+
+FETCH_JS = """
+async ({ url, method, body, headers }) => {
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      body: body === null ? undefined : body,
+      credentials: 'include',
+    });
+  } catch (e) {
+    return { error: String(e) };
+  }
+  const text = await res.text();
+  const out = {};
+  res.headers.forEach((v, k) => { out[k] = v; });
+  return { status: res.status, headers: out, text };
+}
+"""
+
+
+@dataclass
+class BrowserResponse:
+    """Enough of an httpx.Response for `request()` and the callers above it."""
+
+    status_code: int
+    headers: dict[str, str]
+    text: str
+
+    @property
+    def content(self) -> bytes:
+        return self.text.encode("utf-8", "replace")
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+    def raise_for_status(self) -> BrowserResponse:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=None, response=None
+            )
+        return self
+
+
+class BrowserCookies:
+    """`client.cookies` for the browser transport.
+
+    Reads mirror the live browser jar and writes push into it, so the existing
+    `client.cookies.set(...)` calls in instamart.py and `sync_cookies` both keep
+    working against a page instead of an httpx client.
+    """
+
+    def __init__(self, ctx: Any) -> None:
+        self._ctx = ctx
+        self._jar = httpx.Cookies()
+        self.refresh()
+
+    @property
+    def jar(self):  # noqa: ANN201 — matches httpx.Cookies.jar
+        return self._jar.jar
+
+    def refresh(self) -> None:
+        fresh = httpx.Cookies()
+        for c in self._ctx.cookies():
+            fresh.set(c["name"], c["value"], domain=COOKIE_DOMAIN)
+        self._jar = fresh
+
+    def set(self, name: str, value: str, domain: str = COOKIE_DOMAIN, **_: Any) -> None:
+        self._jar.set(name, value, domain=domain)
+        self._ctx.add_cookies(
+            [{"name": name, "value": value, "domain": domain, "path": "/"}]
+        )
+
+    def get(self, name: str, default: Any = None) -> Any:
+        return self._jar.get(name, default)
+
+
+class BrowserClient:
+    """An httpx-shaped client that issues its calls from inside Chromium.
+
+    Playwright's sync API is bound to the thread that started it, so this must
+    be opened, used and closed on one thread. The scheduler already serialises
+    every Instamart call, which is what makes that safe here.
+    """
+
+    def __init__(self, settings: Settings, data: SessionData) -> None:
+        self._settings = settings
+        self._data = data
+        self._pw = None
+        self._browser = None
+        self._ctx = None
+        self._page = None
+        self.cookies: BrowserCookies | None = None
+
+    # ── lifecycle ────────────────────────────────────────────────────
+    def open(self) -> SessionData:
+        """Park a browser on swiggy.com holding a live token."""
+        from playwright.sync_api import sync_playwright
+
+        log.info("opening a browser session (calls will go out from the page)")
+        self._pw = sync_playwright().start()
+        try:
+            self._browser = self._pw.chromium.launch(**_launch_options(self._settings))
+            self._ctx = self._browser.new_context(**_context_options())
+            # Seed whatever we already have; a still-good token means the page
+            # loads without a challenge and we save the wait.
+            if self._data.cookies:
+                self._ctx.add_cookies(
+                    [
+                        {
+                            "name": n,
+                            "value": v,
+                            "domain": COOKIE_DOMAIN,
+                            "path": "/",
+                        }
+                        for n, v in self._data.cookies.items()
+                    ]
+                )
+            self._page = self._ctx.new_page()
+            self._page.goto(
+                "https://www.swiggy.com/instamart",
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+
+            deadline = time.monotonic() + self._settings.bootstrap_seconds
+            while time.monotonic() < deadline:
+                if any(c["name"] == "aws-waf-token" for c in self._ctx.cookies()):
+                    break
+                self._page.wait_for_timeout(500)
+
+            # Instamart is a SPA and redirects itself once the challenge
+            # clears. Fetching mid-navigation destroys the execution context,
+            # so let it come to rest before anyone calls request().
+            self._settle()
+
+            cookies = {c["name"]: c["value"] for c in self._ctx.cookies()}
+            if "aws-waf-token" not in cookies:
+                html, shot = "", None
+                try:
+                    html, shot = self._page.content(), self._page.screenshot()
+                except Exception:  # noqa: BLE001 — diagnostics only
+                    pass
+                why = _diagnose(html, cookies)
+                _save_failure(self._settings, html, shot)
+                raise Blocked(f"no aws-waf-token: {why}")
+        except BaseException:
+            self.close()
+            raise
+
+        self._data.cookies = cookies
+        if not self._data.device_id:
+            raw = urllib.parse.unquote(cookies.get("deviceId", ""))
+            self._data.device_id = raw.removeprefix("s:").split(".")[0]
+        self.cookies = BrowserCookies(self._ctx)
+        log.info("browser session ready (%d cookies)", len(cookies))
+        return self._data
+
+    def _settle(self) -> None:
+        """Wait for the SPA to stop navigating. Best effort — it may never idle."""
+        for state in ("load", "networkidle"):
+            try:
+                self._page.wait_for_load_state(state, timeout=10_000)
+            except Exception:  # noqa: BLE001 — a busy SPA is not a failure
+                pass
+
+    def close(self) -> None:
+        for obj, how in ((self._browser, "close"), (self._pw, "stop")):
+            try:
+                if obj is not None:
+                    getattr(obj, how)()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
+        self._browser = self._pw = self._ctx = self._page = None
+
+    # ── the httpx.Client surface `request()` uses ────────────────────
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any = None,
+        **_: Any,
+    ) -> BrowserResponse:
+        if self._page is None:
+            raise RuntimeError("browser client is not open")
+
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        headers = {
+            "accept": "*/*",
+            "x-build-version": self._settings.build_version,
+            "x-device-id": self._data.device_id,
+        }
+        body = None
+        if json is not None:
+            headers["content-type"] = "application/json"
+            body = _json.dumps(json)
+
+        payload = {"url": url, "method": method, "body": body, "headers": headers}
+        result = self._evaluate(payload)
+        if "error" in result:
+            # Same shape of failure as a dead tunnel, so the retry ladder above
+            # treats it the same way.
+            raise httpx.ConnectError(f"in-page fetch failed: {result['error']}")
+
+        self.cookies.refresh()
+        return BrowserResponse(
+            status_code=result["status"],
+            headers=result["headers"],
+            text=result["text"],
+        )
+
+    def _evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run the fetch, riding out any navigation that lands mid-call."""
+        last: Exception | None = None
+        for attempt in range(EVAL_ATTEMPTS):
+            try:
+                return self._page.evaluate(FETCH_JS, payload)
+            except Exception as e:  # noqa: BLE001 — Playwright's own Error type
+                if "context was destroyed" not in str(e) and "navigating" not in str(e):
+                    raise
+                last = e
+                log.debug("page navigated mid-fetch, settling (%d)", attempt + 1)
+                self._settle()
+        raise httpx.ConnectError(f"page kept navigating away: {last}")
 
 
 def build_client(settings: Settings, data: SessionData) -> httpx.Client:

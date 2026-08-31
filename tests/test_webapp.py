@@ -441,3 +441,28 @@ def test_the_bootstrap_wait_is_clamped(client):
     assert client.put("/api/settings", json={"bootstrap_seconds": 999}).status_code == 422
     assert client.put("/api/settings", json={"bootstrap_seconds": 90}).status_code == 200
     assert config.load().bootstrap_seconds == 90
+
+
+# ── fetch mode ───────────────────────────────────────────────────────
+def test_the_default_fetch_mode_is_auto(client):
+    body = client.get("/api/bootstrap").json()["settings"]
+    assert body["transport"] == "auto"
+    assert body["transports"] == ["auto", "http", "browser"]
+
+
+@pytest.mark.parametrize("mode", ["auto", "http", "browser"])
+def test_each_fetch_mode_round_trips(client, mode):
+    assert client.put("/api/settings", json={"transport": mode}).status_code == 200
+    assert config.load().transport == mode
+
+
+def test_an_unknown_fetch_mode_is_refused(client):
+    r = client.put("/api/settings", json={"transport": "carrier-pigeon"})
+    assert r.status_code == 400
+    assert config.load().transport == "auto"
+
+
+def test_a_junk_mode_in_the_environment_falls_back_to_auto(client, monkeypatch):
+    """A typo in IM_TRANSPORT must not stop the poller dead."""
+    monkeypatch.setenv("IM_TRANSPORT", "htpp")
+    assert config.load().transport == "auto"
