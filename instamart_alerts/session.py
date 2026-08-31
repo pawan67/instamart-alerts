@@ -115,6 +115,13 @@ def _diagnose(html: str, cookies: dict[str, str]) -> str:
             "(raise the bootstrap wait in the panel) — a small VPS can need "
             "well over 20s"
         )
+    if list(cookies) == ["aws-waf-token"]:
+        return (
+            "the challenge handed over a token but never let the real page "
+            "load, so the token was never validated. On a rotating proxy this "
+            "is usually the exit IP changing between the challenge and the "
+            "reload — use a sticky session"
+        )
     if not cookies:
         return (
             "the page set no cookies at all, so it was probably never reached "
@@ -156,6 +163,50 @@ def _context_options() -> dict[str, Any]:
     }
 
 
+INSTAMART_URL = "https://www.swiggy.com/instamart"
+
+
+def _clear_challenge(page: Any, ctx: Any, seconds: float) -> tuple[dict[str, str], int | None]:
+    """Wait for the challenge to *clear*, not merely for a token to appear.
+
+    The WAF answers the first request with a 202 interstitial whose script sets
+    `aws-waf-token` and then reloads the page. Taking the cookie the moment it
+    shows up catches it a beat before that reload, and a token that has not been
+    through the reload is answered 202 on its very first use — which looks
+    exactly like an IP problem and is not one. The tell is the cookie count: a
+    token on its own means the challenge page, while a cleared session carries a
+    dozen-odd cookies including `deviceId`, which the API wants as a header.
+
+    So: once a token exists, ask for the page again. A token the WAF accepts
+    gets a 200 and the site sets its own cookies; one it does not gets another
+    202, and we keep waiting.
+    """
+    deadline = time.monotonic() + seconds
+    status: int | None = None
+    while True:
+        cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+        if "aws-waf-token" in cookies:
+            response = page.goto(
+                INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000
+            )
+            status = response.status if response else None
+            cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+            if status == 200 and len(cookies) > 1:
+                return cookies, status
+            log.debug(
+                "token not accepted yet (HTTP %s, %d cookies), waiting",
+                status,
+                len(cookies),
+            )
+        if time.monotonic() >= deadline:
+            return {c["name"]: c["value"] for c in ctx.cookies()}, status
+        page.wait_for_timeout(1_000)
+
+
+def _cleared(cookies: dict[str, str]) -> bool:
+    return "aws-waf-token" in cookies and len(cookies) > 1
+
+
 def mint_token(settings: Settings) -> SessionData:
     """Launch headless Chromium, clear the WAF challenge, keep the cookies."""
     from playwright.sync_api import sync_playwright  # imported lazily: slow
@@ -176,22 +227,10 @@ def mint_token(settings: Settings) -> SessionData:
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context(**_context_options())
         page = ctx.new_page()
-        response = page.goto(
-            "https://www.swiggy.com/instamart",
-            wait_until="domcontentloaded",
-            timeout=60_000,
-        )
-        status = response.status if response else None
+        page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
 
-        # The challenge script needs a moment to run and set the cookie.
-        deadline = time.monotonic() + settings.bootstrap_seconds
-        while time.monotonic() < deadline:
-            page.wait_for_timeout(500)
-            if any(c["name"] == "aws-waf-token" for c in ctx.cookies()):
-                break
-
-        cookies = {c["name"]: c["value"] for c in ctx.cookies()}
-        if "aws-waf-token" not in cookies:
+        cookies, status = _clear_challenge(page, ctx, settings.bootstrap_seconds)
+        if not _cleared(cookies):
             # Grab the evidence before the browser goes away.
             try:
                 html = page.content()
@@ -200,7 +239,7 @@ def mint_token(settings: Settings) -> SessionData:
                 pass
         browser.close()
 
-    if "aws-waf-token" not in cookies:
+    if not _cleared(cookies):
         why = _diagnose(html, cookies)
         _save_failure(settings, html, failure_shot)
         log.error(
@@ -210,7 +249,7 @@ def mint_token(settings: Settings) -> SessionData:
             len(html),
             why,
         )
-        raise Blocked(f"no aws-waf-token: {why}")
+        raise Blocked(f"challenge not cleared: {why}")
 
     log.info("bootstrap succeeded (HTTP %s, %d cookies)", status, len(cookies))
     # deviceId arrives signed as `s:<uuid>.<signature>`; the API wants the uuid.
@@ -370,25 +409,17 @@ class BrowserClient:
                     ]
                 )
             self._page = self._ctx.new_page()
-            self._page.goto(
-                "https://www.swiggy.com/instamart",
-                wait_until="domcontentloaded",
-                timeout=60_000,
+            self._page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
+
+            cookies, status = _clear_challenge(
+                self._page, self._ctx, self._settings.bootstrap_seconds
             )
-
-            deadline = time.monotonic() + self._settings.bootstrap_seconds
-            while time.monotonic() < deadline:
-                if any(c["name"] == "aws-waf-token" for c in self._ctx.cookies()):
-                    break
-                self._page.wait_for_timeout(500)
-
             # Instamart is a SPA and redirects itself once the challenge
             # clears. Fetching mid-navigation destroys the execution context,
             # so let it come to rest before anyone calls request().
             self._settle()
 
-            cookies = {c["name"]: c["value"] for c in self._ctx.cookies()}
-            if "aws-waf-token" not in cookies:
+            if not _cleared(cookies):
                 html, shot = "", None
                 try:
                     html, shot = self._page.content(), self._page.screenshot()
@@ -396,7 +427,13 @@ class BrowserClient:
                     pass
                 why = _diagnose(html, cookies)
                 _save_failure(self._settings, html, shot)
-                raise Blocked(f"no aws-waf-token: {why}")
+                log.error(
+                    "browser session not cleared: HTTP %s, %d cookies — %s",
+                    status,
+                    len(cookies),
+                    why,
+                )
+                raise Blocked(f"challenge not cleared: {why}")
         except BaseException:
             self.close()
             raise

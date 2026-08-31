@@ -198,6 +198,7 @@
             <span class="field__label">Proxy <span class="field__aside">routes the browser bootstrap and the polls</span></span>
             <input class="input input--mono" id="in-proxy" spellcheck="false" placeholder="socks5://user:pass@host:1080">
           </label>
+          <p class="note note--tight">On a <b>rotating</b> residential proxy, ask for a <b>sticky session</b> — usually a username suffix or a dedicated port, check your provider. The WAF ties the token to the IP that solved the challenge, so an exit that changes between the challenge and the next call invalidates it every time.</p>
           <div class="grid2">
             <label class="field">
               <span class="field__label">Swiggy build version <span class="field__aside">x-build-version</span></span>

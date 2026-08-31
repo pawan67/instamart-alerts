@@ -350,6 +350,14 @@ panel keeps a screenshot of the page Chromium was actually looking at, under
 | refused the page outright | the IP is blocked, not challenged | a different egress |
 | challenge script never finished | it was still working when time ran out | raise the bootstrap wait |
 | set no cookies at all | the page was never reached | egress, DNS, proxy config |
+| handed over a token but never let the real page load | the token was issued and then not honoured — on a rotating proxy, the exit IP changed underneath it | a sticky proxy session |
+
+A bootstrap only counts as successful once the challenge has *cleared*: the WAF
+sets `aws-waf-token`, then reloads the page, and only the reload proves the
+token was accepted. A session holding nothing but the token is the interstitial,
+not the site — it will be answered `202` on its first use. The console prints
+the cookie count for exactly this reason: one cookie is a failure wearing a
+success's clothes, a cleared session carries fifteen or so.
 
 A second symptom is worth knowing: the bootstrap can *succeed* and the very next
 call still get `HTTP 202`. That is the WAF issuing a token it has already
@@ -366,9 +374,15 @@ Set it in the panel under **Connection**, or seed it from `.env`:
 PROXY_URL=socks5://user:pass@host:1080
 ```
 
-It routes both the browser bootstrap and the polling calls. This does not help
-with the WAF challenge (that is solved in the browser, not by IP reputation),
-but it is useful if you poll often enough to attract rate limits.
+It routes both the browser bootstrap and the polling calls.
+
+**Use a sticky session.** The WAF ties the token to the IP that solved the
+challenge, so a rotating proxy that hands out a new exit between the challenge
+and the reload invalidates the token before it is ever used — every time, which
+reads as a permanent block rather than a configuration problem. Most providers
+offer stickiness as a username suffix or a dedicated port; check yours. The
+symptom to watch for in the console is `challenge not cleared` alongside a
+cookie count of one.
 
 ## Tests
 
