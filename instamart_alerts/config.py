@@ -12,6 +12,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -43,6 +44,17 @@ DEFAULT_BOOTSTRAP_SECONDS = 30
 #   auto    — http, falling back to browser on the last retry.
 TRANSPORTS = ("auto", "http", "browser")
 DEFAULT_TRANSPORT = "auto"
+
+# India has never observed daylight saving, so IST is a fixed offset. Spelling it
+# out beats ZoneInfo("Asia/Kolkata") here: a slim container often ships no tzdata,
+# and the failure would land at 3am inside the poll loop.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# Nothing worth being woken for is discounted overnight, and every poll costs
+# metered proxy bandwidth. Hours are IST, on a 24h clock, end-exclusive.
+DEFAULT_QUIET_START = 0  # midnight
+DEFAULT_QUIET_END = 6
+
 
 # Recipients are stored as one string so `.env`, `settings.json` and the panel
 # all speak the same format. Commas, spaces and newlines all separate.
@@ -88,6 +100,11 @@ class Settings:
     # SPA bundles, which only load on the browser transport and are plausibly but
     # unmeasurably cacheable. IM_BROWSER_PROFILE=1 to try it.
     browser_profile: bool = False
+    # Skip *scheduled* passes overnight. Manual checks from the panel always run
+    # — asking for one is unambiguous, whatever the clock says.
+    quiet_hours: bool = True
+    quiet_start: int = DEFAULT_QUIET_START
+    quiet_end: int = DEFAULT_QUIET_END
 
     @property
     def chat_ids(self) -> tuple[str, ...]:
@@ -96,6 +113,21 @@ class Settings:
     @property
     def configured(self) -> bool:
         return bool(self.bot_token and self.chat_ids)
+
+
+def in_quiet_hours(settings: Settings, now: datetime | None = None) -> bool:
+    """True when the poller should stay asleep.
+
+    The window is allowed to wrap midnight (22 -> 6 is four hours of evening and
+    six of morning), and a zero-length window means "never", so setting both ends
+    the same cannot lock the poller out for a whole day.
+    """
+    if not settings.quiet_hours or settings.quiet_start == settings.quiet_end:
+        return False
+    hour = (now or datetime.now(IST)).astimezone(IST).hour
+    if settings.quiet_start < settings.quiet_end:
+        return settings.quiet_start <= hour < settings.quiet_end
+    return hour >= settings.quiet_start or hour < settings.quiet_end
 
 
 def overrides_path(data_dir: Path) -> Path:
@@ -134,6 +166,15 @@ def _int(value, fallback: int) -> int:
         return fallback
 
 
+def _hour(value, fallback: int) -> int:
+    """An hour on a 24h clock, or the fallback. Out-of-range is a typo, not a wrap."""
+    try:
+        hour = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return hour if 0 <= hour <= 23 else fallback
+
+
 def _float(value, fallback: float) -> float:
     try:
         return float(value)
@@ -167,6 +208,15 @@ def load() -> Settings:
         browser_profile=str(
             over.get("browser_profile", os.getenv("IM_BROWSER_PROFILE", "0"))
         ).lower() in ("1", "true", "yes"),
+        quiet_hours=str(
+            over.get("quiet_hours", os.getenv("IM_QUIET_HOURS", "1"))
+        ).lower() not in ("0", "false", "no"),
+        quiet_start=_hour(
+            over.get("quiet_start", os.getenv("IM_QUIET_START")), DEFAULT_QUIET_START
+        ),
+        quiet_end=_hour(
+            over.get("quiet_end", os.getenv("IM_QUIET_END")), DEFAULT_QUIET_END
+        ),
         dev_mode=os.getenv("IM_WEB_DEV", "0") == "1",
         poll_minutes=max(1, _int(over.get("poll_minutes"), DEFAULT_POLL_MINUTES)),
         cooldown_hours=max(

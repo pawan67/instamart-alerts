@@ -359,6 +359,30 @@ Bright Data spells it `-session-`, Oxylabs `sessid-`. Any of them is enough to
 stop the exit moving; the point is that one poll's token has to still be valid
 on the connection that carries the next call.
 
+### Quiet hours
+
+Scheduled checks pause between **00:00 and 06:00 IST**, on by default. Nothing
+worth being woken for is discounted overnight, and every poll costs metered
+proxy bandwidth — six hours off is a quarter of the day's calls.
+
+Manual checks and dry runs from the panel always run. Asking for one is
+unambiguous, whatever the clock says; the pause is for the poller only.
+
+The window is IST regardless of the container's own timezone, spelled as a fixed
++05:30 offset rather than `ZoneInfo` — India has never observed daylight saving,
+and a slim image often ships no tzdata. It may wrap midnight (`22` to `6` is four
+hours of evening plus six of morning). Setting both ends to the same hour means
+*never*, not always, so it cannot silently stop the poller for a whole day.
+
+```
+IM_QUIET_HOURS=0      # poll around the clock
+IM_QUIET_START=23
+IM_QUIET_END=7
+```
+
+Settable from the panel too, and `quiet_now` in the settings payload says
+whether the pause is in effect right now.
+
 ### Bandwidth
 
 Residential proxies bill by the gigabyte, and almost all of it goes on the WAF,

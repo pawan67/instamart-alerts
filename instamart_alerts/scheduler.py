@@ -162,6 +162,12 @@ class Scheduler:
 
     def _poll(self) -> None:
         settings = config.load()
+        if config.in_quiet_hours(settings):
+            log.info(
+                "quiet hours — no scheduled checks until %02d:00 IST",
+                settings.quiet_end,
+            )
+            return
         if not settings.area:
             log.warning("skipping poll — no delivery area set")
             return

@@ -158,6 +158,11 @@ class SettingsIn(BaseModel):
     build_version: str | None = Field(default=None, max_length=32)
     bootstrap_seconds: int | None = Field(default=None, ge=5, le=180)
     transport: str | None = None
+    # Overnight pause, in IST hours on a 24h clock. End is exclusive, and the
+    # window may wrap midnight.
+    quiet_hours: bool | None = None
+    quiet_start: int | None = Field(default=None, ge=0, le=23)
+    quiet_end: int | None = Field(default=None, ge=0, le=23)
 
 
 class PollerIn(BaseModel):
@@ -257,6 +262,10 @@ def _snapshot(settings: config.Settings) -> dict[str, Any]:
             "bootstrap_seconds": settings.bootstrap_seconds,
             "transport": settings.transport,
             "transports": list(config.TRANSPORTS),
+            "quiet_hours": settings.quiet_hours,
+            "quiet_start": settings.quiet_start,
+            "quiet_end": settings.quiet_end,
+            "quiet_now": config.in_quiet_hours(settings),
             "telegram_ready": settings.configured,
         },
         # Set outside the panel, shown so it is obvious what it cannot change.
@@ -394,6 +403,21 @@ def create_app() -> FastAPI:
         if body.bootstrap_seconds is not None:
             changes["bootstrap_seconds"] = int(body.bootstrap_seconds)
             touched.append("bootstrap wait")
+        if body.quiet_hours is not None:
+            changes["quiet_hours"] = bool(body.quiet_hours)
+            touched.append("quiet hours" if body.quiet_hours else "quiet hours (off)")
+        if body.quiet_start is not None or body.quiet_end is not None:
+            start = (
+                body.quiet_start if body.quiet_start is not None else settings.quiet_start
+            )
+            end = body.quiet_end if body.quiet_end is not None else settings.quiet_end
+            if start == end:
+                raise HTTPException(
+                    status_code=400,
+                    detail="quiet hours start and end cannot be the same hour",
+                )
+            changes["quiet_start"], changes["quiet_end"] = int(start), int(end)
+            touched.append(f"quiet hours ({start:02d}:00-{end:02d}:00 IST)")
         if body.build_version is not None:
             build = body.build_version.strip()
             if build and not BUILD_RE.match(build):
