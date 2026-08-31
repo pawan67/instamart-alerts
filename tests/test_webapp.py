@@ -409,3 +409,35 @@ def test_the_environment_block_names_what_the_panel_cannot_change(client):
         "headless": True,
         "mini_app_dev_mode": False,
     }
+
+
+# ── bootstrap diagnostics ────────────────────────────────────────────
+def test_no_bootstrap_failure_is_reported_when_none_happened(client):
+    assert client.get("/api/bootstrap").json()["bootstrap_failure"] is None
+    assert client.get("/api/diagnostics/bootstrap.png").status_code == 404
+
+
+def test_a_saved_bootstrap_failure_is_offered_to_the_panel(client, env):
+    env["data"].mkdir(parents=True, exist_ok=True)
+    (env["data"] / "bootstrap-failure.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
+
+    fail = client.get("/api/bootstrap").json()["bootstrap_failure"]
+    assert fail["screenshot"] == "/api/diagnostics/bootstrap.png"
+    assert fail["at"] > 0
+
+    r = client.get("/api/diagnostics/bootstrap.png")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+
+
+def test_the_bootstrap_screenshot_is_not_public(env, monkeypatch):
+    monkeypatch.setenv("IM_WEB_PASSWORD", "hunter2")
+    with TestClient(webapp.create_app()) as c:
+        assert c.get("/api/diagnostics/bootstrap.png").status_code == 401
+
+
+def test_the_bootstrap_wait_is_clamped(client):
+    assert client.put("/api/settings", json={"bootstrap_seconds": 2}).status_code == 422
+    assert client.put("/api/settings", json={"bootstrap_seconds": 999}).status_code == 422
+    assert client.put("/api/settings", json={"bootstrap_seconds": 90}).status_code == 200
+    assert config.load().bootstrap_seconds == 90

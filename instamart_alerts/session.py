@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,15 +86,59 @@ def save_cached(settings: Settings, data: SessionData) -> None:
     _cache_path(settings).write_text(json.dumps(data.to_json(), indent=2))
 
 
+# Markers in the page that say which wall we hit. The silent JS challenge and
+# the interactive CAPTCHA look identical from the outside — no cookie — but only
+# one of them can ever be solved by a headless browser, so they are worth
+# telling apart before anyone spends an afternoon on browser flags.
+CAPTCHA_MARKERS = ("captcha.awswaf.com", "captcha-container", "aws-waf-captcha")
+CHALLENGE_MARKERS = ("challenge.js", "token.awswaf.com", "awswaf")
+
+
+def _diagnose(html: str, cookies: dict[str, str]) -> str:
+    """Say why no token arrived, in terms of what to do about it."""
+    lowered = html.lower()
+    if any(m in lowered for m in CAPTCHA_MARKERS):
+        return (
+            "Swiggy served an interactive CAPTCHA, which a headless browser "
+            "cannot solve. This is what a datacenter IP usually gets — set a "
+            "residential PROXY_URL (Connection, in the panel) and try again"
+        )
+    if "access denied" in lowered or "request blocked" in lowered:
+        return (
+            "the WAF refused the page outright. The IP is blocked rather than "
+            "challenged; a different egress (PROXY_URL) is the only fix"
+        )
+    if any(m in lowered for m in CHALLENGE_MARKERS):
+        return (
+            "the challenge script loaded but never finished. Give it longer "
+            "(raise the bootstrap wait in the panel) — a small VPS can need "
+            "well over 20s"
+        )
+    if not cookies:
+        return (
+            "the page set no cookies at all, so it was probably never reached "
+            "— check egress, DNS and any proxy"
+        )
+    return (
+        "the page loaded and set cookies, but no aws-waf-token among them "
+        f"({', '.join(sorted(cookies)) or 'none'})"
+    )
+
+
 def mint_token(settings: Settings) -> SessionData:
     """Launch headless Chromium, clear the WAF challenge, keep the cookies."""
     from playwright.sync_api import sync_playwright  # imported lazily: slow
 
-    log.info("minting a fresh WAF token via headless Chromium")
-    launch: dict[str, Any] = {
-        "headless": settings.headless,
-        "args": ["--disable-blink-features=AutomationControlled"],
-    }
+    log.info(
+        "minting a fresh WAF token via headless Chromium (up to %ds)",
+        settings.bootstrap_seconds,
+    )
+    args = ["--disable-blink-features=AutomationControlled"]
+    if os.geteuid() == 0:
+        # Chromium's sandbox needs privileges root does not get in a container.
+        args += ["--no-sandbox", "--disable-dev-shm-usage"]
+
+    launch: dict[str, Any] = {"headless": settings.headless, "args": args}
     if settings.proxy:
         parsed = urllib.parse.urlparse(settings.proxy)
         if parsed.username and parsed.password:
@@ -103,6 +149,11 @@ def mint_token(settings: Settings) -> SessionData:
             }
         else:
             launch["proxy"] = {"server": settings.proxy}
+        log.info("bootstrap is going out through %s", parsed.hostname or "the proxy")
+
+    status: int | None = None
+    html = ""
+    failure_shot: bytes | None = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch)
@@ -113,26 +164,61 @@ def mint_token(settings: Settings) -> SessionData:
             timezone_id="Asia/Kolkata",
         )
         page = ctx.new_page()
-        page.goto(
+        response = page.goto(
             "https://www.swiggy.com/instamart",
             wait_until="domcontentloaded",
             timeout=60_000,
         )
+        status = response.status if response else None
+
         # The challenge script needs a moment to run and set the cookie.
-        for _ in range(20):
-            page.wait_for_timeout(1_000)
+        deadline = time.monotonic() + settings.bootstrap_seconds
+        while time.monotonic() < deadline:
+            page.wait_for_timeout(500)
             if any(c["name"] == "aws-waf-token" for c in ctx.cookies()):
                 break
+
         cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+        if "aws-waf-token" not in cookies:
+            # Grab the evidence before the browser goes away.
+            try:
+                html = page.content()
+                failure_shot = page.screenshot(full_page=False)
+            except Exception:  # noqa: BLE001 — diagnostics must not mask the error
+                pass
         browser.close()
 
     if "aws-waf-token" not in cookies:
-        raise Blocked("browser bootstrap finished without an aws-waf-token")
+        why = _diagnose(html, cookies)
+        _save_failure(settings, html, failure_shot)
+        log.error(
+            "bootstrap failed: HTTP %s, %d cookies, %d bytes of HTML — %s",
+            status,
+            len(cookies),
+            len(html),
+            why,
+        )
+        raise Blocked(f"no aws-waf-token: {why}")
 
+    log.info("bootstrap succeeded (HTTP %s, %d cookies)", status, len(cookies))
     # deviceId arrives signed as `s:<uuid>.<signature>`; the API wants the uuid.
     raw = urllib.parse.unquote(cookies.get("deviceId", ""))
     device_id = raw.removeprefix("s:").split(".")[0]
     return SessionData(cookies=cookies, device_id=device_id)
+
+
+def _save_failure(settings: Settings, html: str, shot: bytes | None) -> None:
+    """Keep the page that refused us, so the panel can show it."""
+    try:
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        if shot:
+            (settings.data_dir / "bootstrap-failure.png").write_bytes(shot)
+        if html:
+            (settings.data_dir / "bootstrap-failure.html").write_text(
+                html[:400_000], encoding="utf-8"
+            )
+    except OSError as e:
+        log.warning("could not save bootstrap diagnostics: %s", e)
 
 
 def build_client(settings: Settings, data: SessionData) -> httpx.Client:

@@ -156,6 +156,7 @@ class SettingsIn(BaseModel):
     poll_minutes: int | None = Field(default=None, ge=1, le=1440)
     cooldown_hours: float | None = Field(default=None, ge=0, le=8760)
     build_version: str | None = Field(default=None, max_length=32)
+    bootstrap_seconds: int | None = Field(default=None, ge=5, le=180)
 
 
 class PollerIn(BaseModel):
@@ -198,6 +199,14 @@ def _pin_store_again(settings: config.Settings) -> None:
         cache.write_text(json.dumps(data, indent=2))
     except (OSError, ValueError):
         cache.unlink(missing_ok=True)
+
+
+def _bootstrap_failure(settings: config.Settings) -> dict[str, Any] | None:
+    """What the browser saw the last time it could not get a WAF token."""
+    shot = settings.data_dir / "bootstrap-failure.png"
+    if not shot.exists():
+        return None
+    return {"at": shot.stat().st_mtime, "screenshot": "/api/diagnostics/bootstrap.png"}
 
 
 def _store_info(settings: config.Settings) -> dict[str, Any]:
@@ -244,6 +253,7 @@ def _snapshot(settings: config.Settings) -> dict[str, Any]:
             "cooldown_hours": settings.cooldown_hours,
             "build_version": settings.build_version,
             "build_version_default": config.BUILD_VERSION,
+            "bootstrap_seconds": settings.bootstrap_seconds,
             "telegram_ready": settings.configured,
         },
         # Set outside the panel, shown so it is obvious what it cannot change.
@@ -255,6 +265,7 @@ def _snapshot(settings: config.Settings) -> dict[str, Any]:
         "watches": [w.to_dict() for w in wl.watches],
         "store": _store_info(settings),
         "scheduler": scheduler.status(),
+        "bootstrap_failure": _bootstrap_failure(settings),
         "watchlist_path": str(settings.watchlist_path),
         "data_dir": str(settings.data_dir),
         "auth": {"password_required": bool(password())},
@@ -368,6 +379,9 @@ def create_app() -> FastAPI:
                 )
             changes["proxy"] = proxy
             touched.append("proxy" if proxy else "proxy (cleared)")
+        if body.bootstrap_seconds is not None:
+            changes["bootstrap_seconds"] = int(body.bootstrap_seconds)
+            touched.append("bootstrap wait")
         if body.build_version is not None:
             build = body.build_version.strip()
             if build and not BUILD_RE.match(build):
@@ -634,6 +648,13 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/api/diagnostics/bootstrap.png")
+    def bootstrap_shot(settings: config.Settings = Auth) -> FileResponse:
+        shot = settings.data_dir / "bootstrap-failure.png"
+        if not shot.exists():
+            raise HTTPException(status_code=404, detail="no bootstrap failure saved")
+        return FileResponse(shot, media_type="image/png")
 
     @app.get("/api/logs")
     def logs(limit: int = Query(default=600, ge=1, le=1500), _: config.Settings = Auth) -> dict:

@@ -313,6 +313,27 @@ systemd timer, cron, or leave `uv run im watch` running. For cron:
 */15 * * * * cd /mnt/newvolume/Projects/personal/instamart-alerts && uv run im check >> data/cron.log 2>&1
 ```
 
+## When the bootstrap fails
+
+`no aws-waf-token: …` means headless Chromium loaded the page but the WAF never
+handed over a cookie. The message names which of four things happened, and the
+panel keeps a screenshot of the page Chromium was actually looking at, under
+**Connection**. Read that before changing anything:
+
+| What the log says | What it means | What fixes it |
+| --- | --- | --- |
+| served an interactive CAPTCHA | the WAF wants a human. Datacenter IPs get this almost every time | a residential `PROXY_URL` |
+| refused the page outright | the IP is blocked, not challenged | a different egress |
+| challenge script never finished | it was still working when time ran out | raise the bootstrap wait |
+| set no cookies at all | the page was never reached | egress, DNS, proxy config |
+
+A second symptom is worth knowing: the bootstrap can *succeed* and the very next
+call still get `HTTP 202`. That is the WAF issuing a token it has already
+decided to re-challenge — the same IP-reputation problem wearing a different
+hat, not a bug in the retry ladder. A home connection clears it routinely; a
+cloud VM often does not, which is why `PROXY_URL` and the bootstrap wait are
+both settable from the panel without a redeploy.
+
 ## Proxy
 
 Set it in the panel under **Connection**, or seed it from `.env`:

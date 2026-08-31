@@ -152,6 +152,15 @@ function applySnapshot(data) {
   $("#in-proxy").value = s.proxy || "";
   $("#in-build").value = s.build_version || "";
   $("#in-build").placeholder = s.build_version_default || "2.367.0";
+  $("#in-bootstrap").value = s.bootstrap_seconds ?? 30;
+
+  const fail = data.bootstrap_failure;
+  $("#boot-fail").hidden = !fail;
+  if (fail) {
+    // Cache-bust, or a second failure shows the first one's screenshot.
+    $("#boot-fail-img").src = `${fail.screenshot}?t=${Math.round(fail.at)}`;
+    $("#boot-fail-at").textContent = new Date(fail.at * 1000).toLocaleString();
+  }
 
   const env = data.environment || {};
   $("#env-pill").textContent = env.password_set ? "password set" : "localhost only";
@@ -777,6 +786,7 @@ function wire() {
             body: {
               proxy: $("#in-proxy").value,
               build_version: $("#in-build").value,
+              bootstrap_seconds: Number($("#in-bootstrap").value) || undefined,
             },
           })
         );

@@ -188,14 +188,31 @@
             <span class="field__label">Proxy <span class="field__aside">routes the browser bootstrap and the polls</span></span>
             <input class="input input--mono" id="in-proxy" spellcheck="false" placeholder="socks5://user:pass@host:1080">
           </label>
-          <label class="field">
-            <span class="field__label">Swiggy build version <span class="field__aside">sent as x-build-version</span></span>
-            <input class="input input--mono" id="in-build" spellcheck="false" placeholder="2.367.0">
-          </label>
+          <div class="grid2">
+            <label class="field">
+              <span class="field__label">Swiggy build version <span class="field__aside">x-build-version</span></span>
+              <input class="input input--mono" id="in-build" spellcheck="false" placeholder="2.367.0">
+            </label>
+            <label class="field">
+              <span class="field__label">Bootstrap wait <span class="field__aside">seconds</span></span>
+              <input class="input input--mono" id="in-bootstrap" type="number" min="5" max="180" step="5">
+            </label>
+          </div>
           <p class="note">Bump the build version if Swiggy starts rejecting the calls — it mirrors their deployed web build. Saving it clears the pinned session so the next call goes out with the new header.</p>
           <div class="row">
             <button class="btn btn--small" id="btn-save-conn">Save connection settings</button>
           </div>
+          <div class="shot" id="boot-fail" hidden>
+            <div class="shot__head">
+              <span>Last failed bootstrap</span>
+              <time id="boot-fail-at"></time>
+            </div>
+            <a id="boot-fail-link" href="/api/diagnostics/bootstrap.png" target="_blank" rel="noreferrer">
+              <img id="boot-fail-img" alt="What Chromium saw when the WAF refused it">
+            </a>
+            <p class="note note--tight">This is the page Chromium was looking at. A CAPTCHA here means the IP is the problem, not the browser — set a proxy above.</p>
+          </div>
+
           <div class="rule"></div>
           <p class="note note--tight">Set outside this panel, in the environment: <code id="env-list"></code></p>
         </div>

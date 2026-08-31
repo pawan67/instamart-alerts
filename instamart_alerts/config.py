@@ -32,6 +32,9 @@ API = "https://www.swiggy.com/api/instamart"
 
 DEFAULT_POLL_MINUTES = 15
 DEFAULT_COOLDOWN_HOURS = 24.0
+# How long to let the WAF challenge script run before giving up on it. A small
+# VPS is much slower at this than a laptop.
+DEFAULT_BOOTSTRAP_SECONDS = 30
 
 # Recipients are stored as one string so `.env`, `settings.json` and the panel
 # all speak the same format. Commas, spaces and newlines all separate.
@@ -64,6 +67,7 @@ class Settings:
     cooldown_hours: float = DEFAULT_COOLDOWN_HOURS
     poll_enabled: bool = False
     build_version: str = BUILD_VERSION
+    bootstrap_seconds: int = DEFAULT_BOOTSTRAP_SECONDS
 
     @property
     def chat_ids(self) -> tuple[str, ...]:
@@ -144,4 +148,15 @@ def load() -> Settings:
         ),
         poll_enabled=bool(over.get("poll_enabled", False)),
         build_version=pick("build_version", "IM_BUILD_VERSION") or BUILD_VERSION,
+        bootstrap_seconds=max(
+            5,
+            min(
+                180,
+                _int(
+                    over.get("bootstrap_seconds")
+                    or os.getenv("IM_BOOTSTRAP_SECONDS"),
+                    DEFAULT_BOOTSTRAP_SECONDS,
+                ),
+            ),
+        ),
     )
