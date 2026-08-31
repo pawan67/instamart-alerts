@@ -5,6 +5,7 @@
     uv run im list eggs        # show everything the search returns right now
     uv run im watch --every 15 # poll forever
     uv run im test-telegram    # verify bot token / chat id
+    uv run im web              # standalone control panel in a browser
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import sys
 import time
 
 from . import config
-from .notify import send
+from .notify import send_to
 from .runner import open_session, run_once
 from .instamart import ensure_location, search
 from .session import Blocked, save_cached, sync_cookies
@@ -134,6 +135,42 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Standalone browser control panel — logs, Telegram setup, watches."""
+    import uvicorn
+
+    from . import logbus
+    from .webapp import create_app, password
+
+    settings = config.load()
+    logbus.install(settings.data_dir)
+
+    reachable = args.host not in ("127.0.0.1", "localhost", "::1")
+    if reachable and not password():
+        sys.exit(
+            f"refusing to bind {args.host} without a password.\n"
+            "The panel can write your bot token, so set IM_WEB_PASSWORD=… first "
+            "(or bind 127.0.0.1 and reach it over an SSH tunnel)."
+        )
+    if not password():
+        logging.getLogger("panel").info(
+            "no IM_WEB_PASSWORD set — only localhost may use this panel"
+        )
+
+    shown = "localhost" if args.host in ("0.0.0.0", "::") else args.host
+    print(f"\n  control panel → http://{shown}:{args.port}\n")
+    # log_config=None leaves uvicorn's loggers propagating to the root logger,
+    # so its lines land in the panel console alongside everything else.
+    uvicorn.run(
+        create_app(),
+        host=args.host,
+        port=args.port,
+        log_config=None,
+        access_log=False,
+    )
+    return 0
+
+
 def cmd_bot(args: argparse.Namespace) -> int:
     from . import bot
 
@@ -187,7 +224,12 @@ def cmd_chat_id(_: argparse.Namespace) -> int:
     print("\nchats that have messaged this bot:")
     for cid, chat in chats.items():
         label = chat.get("username") or chat.get("first_name") or chat.get("title") or ""
-        print(f"  TELEGRAM_CHAT_ID={cid}   ({chat.get('type')}) {label}")
+        print(f"  {cid}   ({chat.get('type')}) {label}")
+
+    joined = ", ".join(str(c) for c in chats)
+    print(f"\nTELEGRAM_CHAT_ID={joined}")
+    if len(chats) > 1:
+        print("(every id on that line gets every alert; drop the ones you don't want)")
     return 0
 
 
@@ -195,9 +237,21 @@ def cmd_test_telegram(_: argparse.Namespace) -> int:
     settings = config.load()
     if not settings.configured:
         sys.exit("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing — set them in .env")
-    ok = send(settings, "✅ <b>instamart-alerts</b> is wired up correctly.")
-    print("sent" if ok else "failed — see the error above")
-    return 0 if ok else 1
+
+    text = "✅ <b>instamart-alerts</b> is wired up correctly."
+    failed = []
+    for chat_id in settings.chat_ids:
+        ok = send_to(settings, chat_id, text)
+        print(f"  {'sent' if ok else 'FAILED'}  {chat_id}")
+        if not ok:
+            failed.append(chat_id)
+
+    if failed:
+        print(
+            f"\n{len(failed)} of {len(settings.chat_ids)} failed — see the errors "
+            "above. Each recipient must press Start on the bot first."
+        )
+    return 1 if failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,6 +277,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)
     s.set_defaults(func=cmd_serve)
+
+    web = sub.add_parser("web", help="standalone control panel in a browser")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8090)
+    web.set_defaults(func=cmd_web)
 
     b = sub.add_parser("bot", help="reply to /start with a Mini App button")
     b.add_argument("--url", default="", help="public HTTPS url of the web app")

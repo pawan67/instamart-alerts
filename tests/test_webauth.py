@@ -108,3 +108,22 @@ def test_missing_user_is_rejected(tmp_path):
 def test_zero_auth_date_is_rejected(tmp_path):
     with pytest.raises(AuthError, match="expired"):
         verify(init_data(auth_date="0"), settings(tmp_path))
+
+
+# ── several recipients may all open the Mini App ─────────────────────
+def test_any_configured_recipient_is_admitted(tmp_path):
+    s = settings(tmp_path, chat_id=f"111, {UID}, 222")
+    assert verify(init_data(), s).id == UID
+
+
+def test_someone_not_on_the_list_is_still_refused(tmp_path):
+    s = settings(tmp_path, chat_id="111, 222")
+    with pytest.raises(AuthError, match="not configured"):
+        verify(init_data(), s)
+
+
+def test_a_substring_of_a_configured_id_is_not_enough(tmp_path):
+    """'95811396' must not slip past because '958113963' is on the list."""
+    s = settings(tmp_path, chat_id=f"{UID}9")
+    with pytest.raises(AuthError, match="not configured"):
+        verify(init_data(), s)

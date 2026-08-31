@@ -7,7 +7,7 @@ The Mini App hands the page a signed `initData` query string. Telegram's scheme:
     valid   = HMAC_SHA256(key=secret, msg=check).hexdigest() == fields["hash"]
 
 Anyone can POST to this server, so every mutating call is verified this way and
-then narrowed to the one Telegram user in TELEGRAM_CHAT_ID.
+then narrowed to the Telegram users listed in TELEGRAM_CHAT_ID.
 """
 
 from __future__ import annotations
@@ -78,8 +78,9 @@ def verify(init_data: str, settings: Settings) -> TelegramUser:
         raise AuthError("initData has no user")
 
     # A valid signature only proves the request came through Telegram, not that
-    # it came from the owner. Pin it to the configured chat.
-    if settings.chat_id and str(uid) != str(settings.chat_id):
+    # it came from the owner. Pin it to the configured recipients.
+    allowed = settings.chat_ids
+    if allowed and str(uid) not in allowed:
         raise AuthError("this bot is not configured for your account")
 
     return TelegramUser(

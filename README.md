@@ -40,14 +40,44 @@ cp .env.example .env                   # then fill it in
 `.env` needs three values:
 
 - `TELEGRAM_BOT_TOKEN` — from [@BotFather](https://t.me/botfather)
-- `TELEGRAM_CHAT_ID` — message your bot, then read `result[].message.chat.id`
-  from `https://api.telegram.org/bot<TOKEN>/getUpdates`
+- `TELEGRAM_CHAT_ID` — one id, or several separated by commas. Message your bot,
+  then read `result[].message.chat.id` from
+  `https://api.telegram.org/bot<TOKEN>/getUpdates`
 - `IM_AREA` — a pincode, an area name, or `"Area, City"`. This picks the dark
   store, which decides both the catalogue and the prices.
 
 A bot cannot open a chat first, so press Start on your bot before anything will
 send — otherwise Telegram answers `400 chat not found` even with a correct id.
 `uv run im chat-id` prints the ids of every chat that has messaged the bot.
+
+### Sending to more than one person
+
+`TELEGRAM_CHAT_ID` takes a list. Every alert goes to every id on it:
+
+```
+TELEGRAM_CHAT_ID=958113963, 123456789
+```
+
+Commas, spaces and newlines all separate; duplicates are dropped. The same field
+in the control panel is a chip input, so you can add people by clicking them out
+of **find**.
+
+Three kinds of id work:
+
+| Id | What it is | How to get it |
+| --- | --- | --- |
+| `958113963` | a person | they press Start on the bot, then `im chat-id` |
+| `-1001234567890` | a group or private channel | add the bot to it, then `im chat-id` |
+| `@my_alerts` | a public channel | add the bot as an administrator |
+
+Everyone on the list must have started the bot (or, for a channel, have the bot
+added) before they can be sent to. A send counts as successful when **at least
+one** recipient got it: one wrong id would otherwise roll the alert back and
+re-send it to the healthy chats on every pass afterwards. Whoever missed out is
+named in the log, and `im test-telegram` reports them one by one.
+
+Everyone on the list can also open the Mini App — `initData` is narrowed to the
+whole list, not just the first id.
 
 Check the wiring:
 
@@ -64,14 +94,70 @@ uv run im check --dry-run  # one pass, prints what it would send
 uv run im check            # one pass, sends for real
 uv run im watch --every 15 # poll every 15 minutes until stopped
 uv run im chat-id          # ids of chats that have messaged the bot
-uv run im test-telegram    # send a test message
+uv run im test-telegram    # send a test message to every recipient
+uv run im web              # standalone control panel in a browser
 uv run im serve            # Mini App web server
 uv run im bot --url https://…   # /start button that opens the Mini App
 ```
 
+## Control panel
+
+A standalone web app — an ordinary browser page, nothing to do with Telegram.
+It is the easiest way to set the thing up, and the only place you can watch it
+work.
+
+```sh
+uv run im web            # http://127.0.0.1:8090
+```
+
+From it you can:
+
+- **paste the bot token and the recipients** and save them without touching
+  `.env`. `find` lists every chat that has messaged the bot, so you add people by
+  clicking them instead of digging through `getUpdates`. Add as many as you like
+  — every alert goes to all of them.
+- **send a test alert** and see, per recipient, who got it and exactly why
+  Telegram refused anyone who didn't.
+- **edit search terms** — threshold, categories, include/exclude filters, max
+  price, in-stock-only — and hit `prices` on any watch to pull live Instamart
+  results and see which ones the filters actually keep.
+- **run a check or a dry run** on the spot, or flip the poller on and leave the
+  panel running as the scheduler.
+- **set the proxy and the Swiggy build version**, the two things you reach for
+  when Instamart starts refusing the calls.
+- **read every log line the process emits**, live, filtered by level or text.
+  History survives a restart (`data/console.log`), and finished runs are pinned
+  into the stream as result blocks.
+
+Anything saved here lands in `data/settings.json`, which is layered over `.env`
+and read by the CLI too — so the panel and `uv run im check` never disagree.
+
+### Getting in
+
+The panel can write your bot token, so it does not answer strangers:
+
+| | |
+| --- | --- |
+| `IM_WEB_PASSWORD` unset | only loopback clients are served; anything else gets a 403 |
+| `IM_WEB_PASSWORD=…` set | a login page, then a signed cookie good for 30 days |
+
+`im web` refuses to bind anything but `127.0.0.1` until a password is set. To
+reach it from your phone, either set one, or leave it on loopback and forward
+the port:
+
+```sh
+ssh -L 8090:127.0.0.1:8090 you@yourbox     # then open http://127.0.0.1:8090
+```
+
+There is no TLS here. On a public address, put it behind a reverse proxy that
+terminates HTTPS — a session cookie over plain HTTP is a session cookie anyone
+on the path can lift.
+
 ## Telegram Mini App
 
-A GUI for the same settings, opened from inside Telegram.
+The same settings again, but opened from inside Telegram rather than a browser.
+It exists because it is convenient on a phone; `im web` above is the fuller
+tool.
 
 ```sh
 uv run im serve                       # http://127.0.0.1:8080
@@ -94,17 +180,88 @@ Set `IM_WEBAPP_URL` in `.env` to skip passing `--url` each time.
 
 Anyone who finds the tunnel URL can reach the server, so every endpoint requires
 the Mini App's signed `initData`, verified by HMAC against your bot token and
-then narrowed to your `TELEGRAM_CHAT_ID`. Requests without it get a 401. A valid
-signature alone is not enough — it only proves the request came through
-Telegram, not that it came from you.
+then narrowed to the ids in `TELEGRAM_CHAT_ID`. Requests without it get a 401. A
+valid signature alone is not enough — it only proves the request came through
+Telegram, not that it came from someone on your list.
 
 `IM_WEB_DEV=1` skips that check so the UI can be opened in a normal browser.
 Only use it bound to localhost.
 
+## Deploying
+
+The panel is one process: it serves the page, the JSON API that page calls, and
+the polling loop. The page fetches `/api/…` on its own origin, so there is no
+second service to route and nothing to proxy between. **One domain, pointed at
+`panel` on port 8090, is the whole deployment.**
+
+```sh
+IM_WEB_PASSWORD=… docker compose up -d      # starts `panel` and nothing else
+```
+
+`docker-compose.yml` also carries the Mini App, its bot, and the standalone
+`im watch` poller, but they sit behind profiles (`--profile miniapp`,
+`--profile cli-poller`) so a plain `up` can never start a second poller racing
+the panel's own over the same WAF session.
+
+### On Dokploy
+
+1. Create a **Compose** application from this repo.
+2. Under **Environment**, set at least `IM_WEB_PASSWORD`. Nothing else is
+   required — the bot token, chat ids and area are all set from the panel
+   afterwards and stored in the data volume. If you would rather bake them in,
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and `IM_AREA` still work.
+3. Under **Domains**, add one domain → service `panel` → port `8090`, HTTPS on.
+4. Deploy, open the domain, and sign in with the password from step 2.
+
+`.dockerignore` keeps `.env` and `data/` out of the image, so a pushed image
+never carries your token and a fresh volume is never seeded from one. Whatever
+you set in the platform's environment still seeds the install; everything you
+save in the panel afterwards lives on the volume. Starting with only
+`IM_WEB_PASSWORD` set and filling in the rest from the panel works fine.
+
+Things that bite on a first deploy:
+
+- **The container exits immediately.** `im web` refuses to bind `0.0.0.0`
+  without `IM_WEB_PASSWORD`, because the panel can write your bot token. The
+  logs say so. Set it and redeploy.
+- **`shm_size: 1gb`** is already in the compose file and needs to stay.
+  Chromium dies during the WAF bootstrap on the default 64 MB `/dev/shm`, and
+  the failure looks like an unrelated browser crash.
+- **Keep the `data-volume`.** It holds the WAF session, the alert history, the
+  watchlist and everything the panel saves. Losing it means re-entering the
+  token and re-alerting every live deal once.
+- The session cookie is marked `Secure` automatically when the request arrives
+  with `X-Forwarded-Proto: https`, which Dokploy's proxy sets. The client IP is
+  deliberately *not* read from headers, so a forwarded header can never
+  impersonate a localhost client.
+
+`GET /api/health` is unauthenticated and answers `{"ok": true, "poller": …}` —
+the compose healthcheck uses it, and it works for an uptime monitor too.
+
+## What lives where
+
+Everything on the left is set in the panel and stored in
+`data/settings.json`; everything on the right has to come from the environment,
+because it is needed before there is a panel to log into.
+
+| Set from the panel | Set in the environment |
+| --- | --- |
+| bot token | `IM_WEB_PASSWORD` — the panel's own password |
+| recipients (chat ids) | `IM_DATA_DIR` — where state is written |
+| delivery area | `IM_WATCHLIST` — path to the watchlist |
+| watches: query, threshold, categories, include/exclude, max price, in-stock | `IM_HEADLESS=0` — watch the bootstrap browser |
+| poll interval, re-alert cooldown | `IM_WEB_DEV=1` — Mini App only |
+| poller on/off | `IM_WEBAPP_URL` — Mini App only |
+| proxy URL | |
+| Swiggy build version | |
+
+`.env` still works for everything on the left, and is read as the floor —
+anything saved in the panel wins over it.
+
 ## Watchlist
 
-`watchlist.json` holds one entry per thing you track, and is what the Mini App
-edits:
+`watchlist.json` holds one entry per thing you track, and is what the control
+panel edits:
 
 ```json
 {
@@ -158,14 +315,15 @@ systemd timer, cron, or leave `uv run im watch` running. For cron:
 
 ## Proxy
 
-Set `PROXY_URL` to route both the browser bootstrap and the polling calls:
+Set it in the panel under **Connection**, or seed it from `.env`:
 
 ```
 PROXY_URL=socks5://user:pass@host:1080
 ```
 
-This does not help with the WAF challenge (that is solved in the browser, not by
-IP reputation), but it is useful if you poll often enough to attract rate limits.
+It routes both the browser bootstrap and the polling calls. This does not help
+with the WAF challenge (that is solved in the browser, not by IP reputation),
+but it is useful if you poll often enough to attract rate limits.
 
 ## Tests
 
@@ -175,8 +333,11 @@ uv run pytest
 
 Covers price parsing against a captured response shape, the watch filters, the
 de-duplication rules, `initData` verification (tampering, wrong token, replay,
-wrong user), and the web API's auth gating. Nothing in the suite hits the
-network.
+wrong user), and both web APIs' auth gating — including that the panel never
+echoes the bot token back and never overwrites it with its own mask. Fan-out
+delivery is covered against a stubbed Telegram: every recipient is tried, a
+rejection does not stop the ones after it, and a partial failure still counts as
+delivered. Nothing in the suite hits the network.
 
 ## Notes
 
@@ -184,6 +345,11 @@ network.
   — eggs topped out at 36% in Bengaluru and 39% in Delhi while the Vasai-Virar
   store ran the same NOICE pack at 75% off. Set thresholds against your own
   store; `uv run im list eggs` shows its live spread.
-- `data/` holds the session token and alert history and is gitignored.
-- Bump `BUILD_VERSION` in `config.py` if Swiggy starts rejecting the calls; it
-  mirrors the deployed web build (`x-build-version`).
+- `data/` holds the session token, alert history, panel settings and the console
+  log, and is gitignored. `settings.json` is written owner-only — it can hold a
+  bot token.
+- If Swiggy starts rejecting the calls, bump the build version under
+  **Connection** in the panel — it mirrors their deployed web build
+  (`x-build-version`), and saving it drops the pinned session so the next call
+  goes out with the new header. `BUILD_VERSION` in `config.py` is only the
+  fallback, so a deployed install can be fixed without a redeploy.

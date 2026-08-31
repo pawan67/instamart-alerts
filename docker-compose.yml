@@ -1,39 +1,96 @@
-version: "3.8"
+# One service does everything: it serves the control panel, the JSON API it
+# talks to, and the polling loop. There is no separate frontend to route — the
+# page fetches `/api/...` on its own origin — so a deployment needs exactly one
+# domain pointed at `panel` on port 8090.
+#
+# The extra services below are the older CLI-shaped ways to run the same code.
+# They sit behind profiles so `docker compose up` never starts a second poller
+# alongside the panel's own.
 
 services:
-  web:
+  panel:
+    build: .
+    restart: unless-stopped
+    # Reachable to other containers and to a reverse proxy (Traefik, Caddy,
+    # Dokploy) without being published on the host. Add a `ports:` mapping if
+    # you want to hit it directly, e.g. ["8090:8090"].
+    expose:
+      - "8090"
+    environment:
+      # Required — `im web` refuses to bind 0.0.0.0 without it, because the
+      # panel can write your bot token.
+      IM_WEB_PASSWORD: ${IM_WEB_PASSWORD:?set a panel password before deploying}
+      IM_DATA_DIR: /app/data
+      IM_WATCHLIST: /app/data/watchlist.json
+    env_file:
+      # Everything else (bot token, chat ids, area) is optional here — the panel
+      # writes its own settings to the data volume. Locally this picks up .env;
+      # on a host like Dokploy the platform supplies the variables instead.
+      - path: .env
+        required: false
+    volumes:
+      - data-volume:/app/data
+    # Chromium dies on the default 64 MB /dev/shm during the WAF bootstrap.
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/api/health').read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  # ── optional: the Telegram Mini App, on its own domain ───────────────
+  mini-app:
+    profiles: ["miniapp"]
     build: .
     command: uv run im serve --host 0.0.0.0 --port 8080
-    ports:
-      - "8080:8080"
     restart: unless-stopped
-    env_file: .env
+    expose:
+      - "8080"
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - IM_WATCHLIST=/app/data/watchlist.json
+      IM_DATA_DIR: /app/data
+      IM_WATCHLIST: /app/data/watchlist.json
     volumes:
       - data-volume:/app/data
 
+  # The /start button that opens the Mini App. Needs IM_WEBAPP_URL.
   bot:
+    profiles: ["miniapp"]
     build: .
     command: uv run im bot
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - IM_WATCHLIST=/app/data/watchlist.json
-    depends_on:
-      - web
+      IM_DATA_DIR: /app/data
+      IM_WATCHLIST: /app/data/watchlist.json
     volumes:
       - data-volume:/app/data
+    depends_on:
+      - mini-app
 
+  # ── optional: poll from a separate container instead of the panel ────
+  # Only useful if you keep the panel's own poller switched off; two pollers
+  # would fight over the WAF session.
   watch:
+    profiles: ["cli-poller"]
     build: .
     command: uv run im watch --every 15
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - IM_WATCHLIST=/app/data/watchlist.json
+      IM_DATA_DIR: /app/data
+      IM_WATCHLIST: /app/data/watchlist.json
     volumes:
       - data-volume:/app/data
+    shm_size: 1gb
 
 volumes:
   data-volume:

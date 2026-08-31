@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en" data-boot="pending">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Instamart Alerts — Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/panel/panel.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230d0c0a'/><circle cx='16' cy='16' r='6' fill='%23ffb02e'/></svg>">
+</head>
+<body>
+
+<!-- ── lock screen ───────────────────────────────────────────────── -->
+<div class="lock" id="lock" hidden>
+  <form class="lock__card" id="lock-form">
+    <div class="lock__mark">IM<span>·</span>ALERTS</div>
+    <h1 class="lock__title">Control <em>panel</em></h1>
+    <p class="lock__hint" id="lock-hint">This panel can read and write your bot token. Sign in to continue.</p>
+    <label class="field">
+      <span class="field__label">Password</span>
+      <input class="input" type="password" id="lock-password" autocomplete="current-password" autofocus>
+    </label>
+    <button class="btn btn--primary btn--block" type="submit">Unlock</button>
+    <p class="lock__error" id="lock-error" hidden></p>
+  </form>
+</div>
+
+<!-- ── app ───────────────────────────────────────────────────────── -->
+<div class="app" id="app" hidden>
+
+  <header class="topbar">
+    <div class="topbar__brand">
+      <div class="mark" aria-hidden="true"><span class="mark__dot" id="pulse"></span></div>
+      <div class="brand">
+        <div class="brand__name">INSTAMART</div>
+        <div class="brand__sub">price <em>alerts</em></div>
+      </div>
+    </div>
+
+    <div class="topbar__stats">
+      <div class="stat" title="Telegram delivery">
+        <span class="stat__k">Telegram</span>
+        <span class="stat__v" id="stat-telegram">—</span>
+      </div>
+      <div class="stat" title="Pinned dark store">
+        <span class="stat__k">Store</span>
+        <span class="stat__v" id="stat-store">—</span>
+      </div>
+      <div class="stat" title="Enabled watches">
+        <span class="stat__k">Watches</span>
+        <span class="stat__v" id="stat-watches">0</span>
+      </div>
+      <div class="stat stat--wide" title="Time until the next scheduled poll">
+        <span class="stat__k">Next poll</span>
+        <span class="stat__v" id="stat-next">off</span>
+      </div>
+    </div>
+
+    <div class="topbar__poller">
+      <label class="switch" title="Run a check on a schedule">
+        <input type="checkbox" id="poller-toggle">
+        <span class="switch__track"><span class="switch__thumb"></span></span>
+        <span class="switch__label">Poller</span>
+      </label>
+    </div>
+  </header>
+
+  <main class="workspace">
+
+    <!-- ── left rail ───────────────────────────────────────────── -->
+    <div class="rail" id="rail">
+
+      <!-- 01 TELEGRAM -->
+      <section class="card reveal" style="--i:0">
+        <div class="card__head">
+          <h2 class="card__title"><i>01</i> Telegram</h2>
+          <span class="pill" id="tg-pill">not connected</span>
+        </div>
+        <div class="card__body">
+          <p class="note">A bot can’t message anyone first. Each person opens the bot and presses <b>Start</b>, then <b>find</b> lists them. Groups and channels work too — add the bot, then use its negative id.</p>
+
+          <label class="field">
+            <span class="field__label">Bot token <a class="field__aside" href="https://t.me/botfather" target="_blank" rel="noreferrer">@BotFather ↗</a></span>
+            <span class="input-wrap">
+              <input class="input input--mono" id="in-token" type="password" spellcheck="false" placeholder="1234567890:AA…">
+              <button class="ghost-btn" type="button" id="btn-reveal" title="Show / hide">👁</button>
+            </span>
+          </label>
+
+          <div class="field">
+            <span class="field__label">Recipients <span class="field__aside">every id here gets every alert</span>
+              <button class="ghost-btn" type="button" id="btn-find-chat">find</button>
+            </span>
+            <div class="tags tags--mono" id="chat-ids"></div>
+          </div>
+
+          <div class="chat-picker" id="chat-picker" hidden></div>
+
+          <div class="row">
+            <button class="btn btn--primary" id="btn-save-tg">Save connection</button>
+            <button class="btn" id="btn-test">Send test alert</button>
+          </div>
+          <div class="result" id="tg-result" hidden></div>
+        </div>
+      </section>
+
+      <!-- 02 LOCATION -->
+      <section class="card reveal" style="--i:1">
+        <div class="card__head">
+          <h2 class="card__title"><i>02</i> Delivery area</h2>
+          <span class="pill pill--quiet" id="store-pill">no store pinned</span>
+        </div>
+        <div class="card__body">
+          <p class="note">Prices are per dark store. A pincode, an area, or “Area, City” — changing it re-resolves the store.</p>
+          <label class="field">
+            <span class="field__label">Area or pincode</span>
+            <span class="input-wrap">
+              <input class="input" id="in-area" spellcheck="false" placeholder="401209">
+              <button class="ghost-btn" type="button" id="btn-save-area">save</button>
+            </span>
+          </label>
+          <div class="kv" id="store-kv"></div>
+        </div>
+      </section>
+
+      <!-- 03 WATCHES -->
+      <section class="card reveal" style="--i:2">
+        <div class="card__head">
+          <h2 class="card__title"><i>03</i> Search terms</h2>
+          <span class="dirty" id="watch-dirty" hidden>unsaved</span>
+          <button class="btn btn--small" id="btn-add-watch">+ Add</button>
+        </div>
+        <div class="card__body card__body--flush">
+          <div class="watches" id="watches"></div>
+          <div class="watches__foot">
+            <button class="btn btn--primary" id="btn-save-watches">Save watchlist</button>
+            <span class="path" id="watchlist-path"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 04 RUN -->
+      <section class="card reveal" style="--i:3">
+        <div class="card__head">
+          <h2 class="card__title"><i>04</i> Runs &amp; upkeep</h2>
+        </div>
+        <div class="card__body">
+          <div class="row">
+            <button class="btn btn--primary" id="btn-run">Run check now</button>
+            <button class="btn" id="btn-dry">Dry run</button>
+          </div>
+          <p class="note">A dry run does everything except send — useful while you dial in thresholds.</p>
+
+          <div class="grid2">
+            <label class="field">
+              <span class="field__label">Poll every <span class="field__aside">minutes</span></span>
+              <input class="input input--mono" id="in-minutes" type="number" min="1" max="1440" step="1">
+            </label>
+            <label class="field">
+              <span class="field__label">Re-alert after <span class="field__aside">hours</span></span>
+              <input class="input input--mono" id="in-cooldown" type="number" min="0" max="8760" step="1">
+            </label>
+          </div>
+          <div class="row">
+            <button class="btn btn--small" id="btn-save-timing">Save timing</button>
+          </div>
+
+          <div class="rule"></div>
+          <div class="row row--wrap">
+            <button class="btn btn--small btn--quiet" id="btn-reset-session">Re-mint session</button>
+            <button class="btn btn--small btn--quiet" id="btn-reset-alerts">Forget alert history</button>
+          </div>
+          <p class="note note--tight">Re-minting drops the cached WAF token and store pin. Forgetting history lets every live deal alert again.</p>
+        </div>
+      </section>
+
+      <!-- 05 ADVANCED -->
+      <section class="card reveal" style="--i:4">
+        <div class="card__head">
+          <h2 class="card__title"><i>05</i> Connection</h2>
+          <span class="pill pill--quiet" id="env-pill"></span>
+        </div>
+        <div class="card__body">
+          <label class="field">
+            <span class="field__label">Proxy <span class="field__aside">routes the browser bootstrap and the polls</span></span>
+            <input class="input input--mono" id="in-proxy" spellcheck="false" placeholder="socks5://user:pass@host:1080">
+          </label>
+          <label class="field">
+            <span class="field__label">Swiggy build version <span class="field__aside">sent as x-build-version</span></span>
+            <input class="input input--mono" id="in-build" spellcheck="false" placeholder="2.367.0">
+          </label>
+          <p class="note">Bump the build version if Swiggy starts rejecting the calls — it mirrors their deployed web build. Saving it clears the pinned session so the next call goes out with the new header.</p>
+          <div class="row">
+            <button class="btn btn--small" id="btn-save-conn">Save connection settings</button>
+          </div>
+          <div class="rule"></div>
+          <p class="note note--tight">Set outside this panel, in the environment: <code id="env-list"></code></p>
+        </div>
+      </section>
+
+      <footer class="rail__foot">
+        <span id="foot-paths"></span>
+        <button class="linkish" id="btn-logout" hidden>sign out</button>
+      </footer>
+    </div>
+
+    <!-- ── console ─────────────────────────────────────────────── -->
+    <div class="console reveal" style="--i:2">
+      <div class="console__head">
+        <div class="console__title">
+          <span class="live" id="live-dot"></span>
+          <h2>Console</h2>
+          <span class="console__count" id="log-count">0</span>
+        </div>
+        <div class="console__tools">
+          <div class="levels" id="levels">
+            <button class="lvl is-on" data-level="ALL">all</button>
+            <button class="lvl" data-level="INFO">info</button>
+            <button class="lvl" data-level="WARNING">warn</button>
+            <button class="lvl" data-level="ERROR">error</button>
+          </div>
+          <input class="input input--search" id="log-filter" placeholder="filter…" spellcheck="false">
+          <button class="ghost-btn" id="btn-follow" title="Follow new lines" data-on="1">follow</button>
+          <button class="ghost-btn" id="btn-download" title="Download log">save</button>
+          <button class="ghost-btn" id="btn-clear-logs" title="Clear console">clear</button>
+        </div>
+      </div>
+      <div class="console__body" id="log-body">
+        <div class="console__empty" id="log-empty">waiting for output…</div>
+      </div>
+      <div class="console__foot">
+        <span class="console__cursor">▊</span>
+        <span id="console-status">connecting…</span>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<template id="tpl-watch">
+  <article class="watch">
+    <header class="watch__head">
+      <button class="watch__disc" type="button" data-act="toggle-open" title="Expand">▸</button>
+      <label class="tick" title="Enable this watch">
+        <input type="checkbox" data-f="enabled"><span></span>
+      </label>
+      <input class="watch__name" data-f="name" placeholder="Name">
+      <span class="watch__meta"><b data-role="pct">0</b>%<i>off</i></span>
+      <button class="ghost-btn" type="button" data-act="preview" title="Live prices for this query">prices</button>
+      <button class="ghost-btn ghost-btn--danger" type="button" data-act="delete" title="Delete">✕</button>
+    </header>
+    <div class="watch__body">
+      <div class="grid2">
+        <label class="field">
+          <span class="field__label">Search term</span>
+          <input class="input" data-f="query" placeholder="eggs">
+        </label>
+        <label class="field">
+          <span class="field__label">Max price <span class="field__aside">₹, blank = any</span></span>
+          <input class="input input--mono" data-f="max_price" type="number" min="0" step="1" placeholder="—">
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="field__label">Alert at or above <b data-role="pct-label">0%</b> off</span>
+        <input class="slider" data-f="min_discount_pct" type="range" min="0" max="95" step="1">
+      </div>
+
+      <div class="field">
+        <span class="field__label">Categories <span class="field__aside">keeps only these aisles</span></span>
+        <div class="tags" data-tags="categories"></div>
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <span class="field__label">Name must include</span>
+          <div class="tags" data-tags="include"></div>
+        </div>
+        <div class="field">
+          <span class="field__label">Name must not include</span>
+          <div class="tags" data-tags="exclude"></div>
+        </div>
+      </div>
+
+      <label class="tick tick--row">
+        <input type="checkbox" data-f="in_stock_only"><span></span>
+        <span class="tick__text">Skip out-of-stock variants</span>
+      </label>
+
+      <div class="preview" data-role="preview" hidden></div>
+    </div>
+  </article>
+</template>
+
+<script src="/panel/panel.js" type="module"></script>
+</body>
+</html>

@@ -15,6 +15,7 @@ RUN uv sync --frozen
 
 RUN uv run playwright install --with-deps chromium
 
-EXPOSE 8080
+# The control panel: UI, API and poller in one process, one origin, one port.
+EXPOSE 8090
 
-CMD ["uv", "run", "im", "serve", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uv", "run", "im", "web", "--host", "0.0.0.0", "--port", "8090"]

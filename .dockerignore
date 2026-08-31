@@ -1,0 +1,28 @@
+# Secrets and runtime state must never be baked into the image — it may be
+# pushed to a registry, and a named volume mounted at /app/data would otherwise
+# be seeded from whatever the image happened to carry.
+.env
+.env.*
+!.env.example
+data/
+
+# Not needed at runtime, and a 2 GB build context slows every build.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+build
+dist
+wheels
+*.egg-info
+
+# Local scratch
+tests/
+*.png
+fix_*.py
+test_*.py
+test_*.sh
+test_*.js

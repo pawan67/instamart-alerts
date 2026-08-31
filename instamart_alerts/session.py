@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from .config import API, BUILD_VERSION, USER_AGENT, Settings
+from .config import API, USER_AGENT, Settings
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,6 @@ def mint_token(settings: Settings) -> SessionData:
         "args": ["--disable-blink-features=AutomationControlled"],
     }
     if settings.proxy:
-        import urllib.parse
         parsed = urllib.parse.urlparse(settings.proxy)
         if parsed.username and parsed.password:
             launch["proxy"] = {
@@ -142,7 +141,7 @@ def build_client(settings: Settings, data: SessionData) -> httpx.Client:
         "Accept": "*/*",
         "Accept-Language": "en-IN",
         "content-type": "application/json",
-        "x-build-version": BUILD_VERSION,
+        "x-build-version": settings.build_version,
         "x-device-id": data.device_id,
         "Origin": "https://www.swiggy.com",
         "Referer": "https://www.swiggy.com/instamart",

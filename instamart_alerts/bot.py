@@ -31,16 +31,29 @@ def _api(settings: Settings, method: str, **payload) -> dict:
 
 
 def set_menu_button(settings: Settings, url: str) -> bool:
-    """Put a persistent 'Alerts' button next to the chat input."""
-    res = _api(
-        settings,
-        "setChatMenuButton",
-        chat_id=int(settings.chat_id),
-        menu_button={"type": "web_app", "text": "Alerts", "web_app": {"url": url}},
-    )
-    if not res.get("ok"):
-        log.error("setChatMenuButton failed: %s", res.get("description"))
-    return bool(res.get("ok"))
+    """Put a persistent 'Alerts' button next to the chat input, for each recipient."""
+    results = []
+    for chat_id in settings.chat_ids:
+        try:
+            res = _api(
+                settings,
+                "setChatMenuButton",
+                chat_id=int(chat_id),
+                menu_button={
+                    "type": "web_app",
+                    "text": "Alerts",
+                    "web_app": {"url": url},
+                },
+            )
+        except ValueError:
+            log.error("skipping non-numeric chat id %r", chat_id)
+            continue
+        if not res.get("ok"):
+            log.error(
+                "setChatMenuButton failed for %s: %s", chat_id, res.get("description")
+            )
+        results.append(bool(res.get("ok")))
+    return any(results)
 
 
 def run(settings: Settings, url: str) -> None:
@@ -70,7 +83,8 @@ def run(settings: Settings, url: str) -> None:
             chat_id = (msg.get("chat") or {}).get("id")
             if chat_id is None:
                 continue
-            if settings.chat_id and str(chat_id) != str(settings.chat_id):
+            allowed = settings.chat_ids
+            if allowed and str(chat_id) not in allowed:
                 log.info("ignoring message from chat %s", chat_id)
                 continue
 
