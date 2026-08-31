@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
+    # brotli/zstd are what let httpx negotiate better than gzip on the search
+    # payloads, which are the steady-state cost of a poll on metered bandwidth.
+    "brotli>=1.1.0",
     "httpx[socks]>=0.28.1",
     "playwright>=1.62.0",
     "python-dotenv>=1.2.3",

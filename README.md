@@ -316,6 +316,7 @@ Read that before changing anything:
 
 | What the log says | What it means | What fixes it |
 | --- | --- | --- |
+| stopped answering challenges for this client | too many rounds were started and abandoned, so the WAF quit issuing them | wait it out, then a sticky session |
 | handed over a token but never let the real page load | issued and then not honoured — usually the exit IP changing underneath it | a sticky proxy session |
 | served an interactive CAPTCHA | the WAF wants a human; datacenter IPs get this often | a residential `PROXY_URL` |
 | refused the page outright | the IP is blocked, not challenged | a different egress |
@@ -337,7 +338,63 @@ challenge, so a rotating proxy that hands out a new exit between the challenge
 and the reload invalidates the token before it is ever used — every time, which
 reads as a permanent block rather than a configuration problem. Most providers
 offer stickiness as a username suffix or a dedicated port; check yours. The
-symptom is `challenge not cleared` alongside a cookie count of one.
+symptom is `challenge not cleared` alongside a cookie count of one, and the
+bootstrap logs a warning when the username pins nothing.
+
+For DataImpulse the suffix goes on the username — `sessid` names the session and
+`sessttl` sets how long the IP is held (30 minutes by default, which is shorter
+than it looks when the poller runs every 15):
+
+```
+PROXY_URL=http://LOGIN__cr.in;sessid.instamart;sessttl.60:PASSWORD@gw.dataimpulse.com:10000
+```
+
+Keep the `http://` scheme even if your provider also offers SOCKS5 on the same
+port. Chromium cannot authenticate to a SOCKS5 proxy, and Chromium is what mints
+the token — so `socks5://user:pass@…` breaks the one call that matters while the
+cheap polls carry on working. The bootstrap refuses that combination outright
+rather than letting Playwright report it as a browser problem.
+
+Bright Data spells it `-session-`, Oxylabs `sessid-`. Any of them is enough to
+stop the exit moving; the point is that one poll's token has to still be valid
+on the connection that carries the next call.
+
+### Bandwidth
+
+Residential proxies bill by the gigabyte, and almost all of it goes on the WAF,
+not on the catalogue. The challenge interstitial is small but `challenge.js`
+behind it is **~300 KB, measured**, and it is re-fetched on every challenge
+round — a fresh browser starts with an empty cache, so nothing is reused between
+polls.
+
+That makes *bootstrap frequency* the whole ball game. Three things keep it down:
+
+- **A sticky proxy session.** Without one the cached token is refused on nearly
+  every poll and each one pays for a fresh bootstrap. This is the big one.
+- **`MAX_RELOADS`.** The old clearance loop reloaded once a second for the whole
+  bootstrap window; every 202 it collected served `challenge.js` again, so a
+  single failed bootstrap could spend several MB before giving up. It is capped
+  at three rounds now.
+- **The poll interval.** It scales everything linearly. 15 → 30 minutes halves
+  the bill and is the one lever with no downside but latency.
+
+Two smaller ones are on by default: the bootstrap browser drops images, media
+and fonts (`IM_BLOCK_IMAGES=0` to restore them, if the WAF ever minds a browser
+that loads no pictures), and `brotli` is a dependency so httpx negotiates better
+than gzip on the search payloads.
+
+**What does not work, measured:** reusing a Chromium profile (`IM_BROWSER_PROFILE=1`)
+does not cache `challenge.js`. The URL is stable and it is served
+`cache-control: private, max-age=86400`, but Chromium reports `fromDiskCache=false`
+on every warm start regardless — with request interception on or off. The option
+is kept because Swiggy's own SPA bundles, which load on the browser transport,
+are a separate and plausibly cacheable ~1.9 MB; that half is untested. Do not
+expect it to touch the challenge cost.
+
+For reference, one bootstrap that clears and then loads the SPA measured
+**2.7 MB**; one that only clears the challenge and stops is closer to **0.3 MB**.
+The browser transport pays the former on every pass, which is why it is a
+fallback and not the default.
 
 A rotating exit also shows up as intermittent connection failures rather than
 WAF refusals, because the tunnel itself is being rebuilt underneath you:

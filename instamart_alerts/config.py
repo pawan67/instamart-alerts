@@ -77,6 +77,17 @@ class Settings:
     build_version: str = BUILD_VERSION
     bootstrap_seconds: int = DEFAULT_BOOTSTRAP_SECONDS
     transport: str = DEFAULT_TRANSPORT
+    # Skip images/media/fonts in the bootstrap browser. Nothing here renders, so
+    # this is free bandwidth — set IM_BLOCK_IMAGES=0 if the WAF ever starts
+    # minding a browser that loads no pictures.
+    block_images: bool = True
+    # Reuse one Chromium profile between bootstraps, so its disk cache survives.
+    # Off by default: the hoped-for win was caching `challenge.js` (~300 KB a
+    # round) and that was measured not to happen — Chromium re-fetches it every
+    # time despite a stable URL and `max-age=86400`. What is left is Swiggy's own
+    # SPA bundles, which only load on the browser transport and are plausibly but
+    # unmeasurably cacheable. IM_BROWSER_PROFILE=1 to try it.
+    browser_profile: bool = False
 
     @property
     def chat_ids(self) -> tuple[str, ...]:
@@ -150,6 +161,12 @@ def load() -> Settings:
         data_dir=data_dir,
         watchlist_path=Path(os.getenv("IM_WATCHLIST") or ROOT / "watchlist.json"),
         headless=os.getenv("IM_HEADLESS", "1") != "0",
+        block_images=str(
+            over.get("block_images", os.getenv("IM_BLOCK_IMAGES", "1"))
+        ).lower() not in ("0", "false", "no"),
+        browser_profile=str(
+            over.get("browser_profile", os.getenv("IM_BROWSER_PROFILE", "0"))
+        ).lower() in ("1", "true", "yes"),
         dev_mode=os.getenv("IM_WEB_DEV", "0") == "1",
         poll_minutes=max(1, _int(over.get("poll_minutes"), DEFAULT_POLL_MINUTES)),
         cooldown_hours=max(

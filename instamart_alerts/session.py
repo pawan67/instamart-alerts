@@ -94,10 +94,23 @@ def save_cached(settings: Settings, data: SessionData) -> None:
 CAPTCHA_MARKERS = ("captcha.awswaf.com", "captcha-container", "aws-waf-captcha")
 CHALLENGE_MARKERS = ("challenge.js", "token.awswaf.com", "awswaf")
 
+# The WAF's own interstitial once it has served more challenge rounds than it is
+# willing to, none of them finished. It is a dead end: reloading past this page
+# never works, it only deepens the hole.
+EXHAUSTED_MARKERS = ("max challenge attempts exceeded",)
+
 
 def _diagnose(html: str, cookies: dict[str, str]) -> str:
     """Say why no token arrived, in terms of what to do about it."""
     lowered = html.lower()
+    if any(m in lowered for m in EXHAUSTED_MARKERS):
+        return (
+            "the WAF stopped answering challenges for this client — too many "
+            "rounds were started and left unfinished. If it survives a restart "
+            "the exit IP is rotating between the challenge and the reload, so "
+            "every try begins a round nobody can finish: pin the IP with a "
+            "sticky session"
+        )
     if any(m in lowered for m in CAPTCHA_MARKERS):
         return (
             "Swiggy served an interactive CAPTCHA, which a headless browser "
@@ -143,6 +156,17 @@ def _launch_options(settings: Settings) -> dict[str, Any]:
     launch: dict[str, Any] = {"headless": settings.headless, "args": args}
     if settings.proxy:
         parsed = urllib.parse.urlparse(settings.proxy)
+        # Chromium's SOCKS5 client cannot authenticate, so a socks5:// URL with
+        # credentials dies inside Playwright with a message about browser
+        # support that says nothing about the proxy. httpx has no such limit,
+        # which makes this fail in the one place that matters most — minting the
+        # token — while every cheap poll carries on working.
+        if parsed.scheme.startswith("socks") and parsed.username:
+            raise Blocked(
+                "Chromium cannot authenticate to a SOCKS5 proxy, and the WAF "
+                "token can only be minted in a browser. Use the same gateway "
+                "over http:// instead — the credentials and port are unchanged"
+            )
         if parsed.username and parsed.password:
             launch["proxy"] = {
                 "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
@@ -152,6 +176,52 @@ def _launch_options(settings: Settings) -> dict[str, Any]:
         else:
             launch["proxy"] = {"server": settings.proxy}
     return launch
+
+
+# Residential gateways hand out a different exit IP per connection unless the
+# username pins one. That breaks this design at both seams: the challenge and the
+# reload that validates its token leave from different addresses, and every later
+# httpx poll leaves from another one again, so a token that was minted fine is
+# refused on first use. Providers spell the parameter differently, so this only
+# looks for the shape of one.
+STICKY_MARKERS = ("sessid", "session", "sess-", "sess.")
+STICKY_HINT = (
+    "the proxy username pins no session, so the exit IP can change between the "
+    "challenge and the reload that validates its token — and again on every "
+    "poll after that. Add your provider's sticky-session parameter "
+    "(DataImpulse: 'user__cr.in;sessid.instamart;sessttl.60')"
+)
+
+
+def _warn_if_rotating(settings: Settings) -> None:
+    if not settings.proxy:
+        return
+    user = (urllib.parse.urlparse(settings.proxy).username or "").lower()
+    if not any(m in user for m in STICKY_MARKERS):
+        log.warning(STICKY_HINT)
+
+
+# A headless poller renders nothing, so every byte spent on things that exist
+# only to be looked at is pure proxy spend — and on residential bandwidth that is
+# metered by the gigabyte. Product thumbnails dominate an Instamart page. Scripts
+# and stylesheets are deliberately *not* blocked: the challenge itself is a
+# script, and a browser that fetches no CSS at all is one worth fingerprinting.
+COSMETIC_RESOURCES = frozenset({"image", "media", "font"})
+
+
+def _block_cosmetics(ctx: Any) -> None:
+    """Drop image/media/font requests before they leave the machine."""
+
+    def route(r: Any) -> None:
+        try:
+            if r.request.resource_type in COSMETIC_RESOURCES:
+                r.abort()
+            else:
+                r.continue_()
+        except Exception:  # noqa: BLE001 — a dead route must not kill the page
+            pass
+
+    ctx.route("**/*", route)
 
 
 def _context_options() -> dict[str, Any]:
@@ -165,46 +235,171 @@ def _context_options() -> dict[str, Any]:
 
 INSTAMART_URL = "https://www.swiggy.com/instamart"
 
+PROFILE_DIR = "chromium-profile"
 
-def _clear_challenge(page: Any, ctx: Any, seconds: float) -> tuple[dict[str, str], int | None]:
-    """Wait for the challenge to *clear*, not merely for a token to appear.
 
-    The WAF answers the first request with a 202 interstitial whose script sets
-    `aws-waf-token` and then reloads the page. Taking the cookie the moment it
-    shows up catches it a beat before that reload, and a token that has not been
-    through the reload is answered 202 on its very first use — which looks
-    exactly like an IP problem and is not one. The tell is the cookie count: a
-    token on its own means the challenge page, while a cleared session carries a
-    dozen-odd cookies including `deviceId`, which the API wants as a header.
+def _open_context(pw: Any, settings: Settings) -> tuple[Any, Any]:
+    """A Chromium context and its page, reusing one profile where it can.
 
-    So: once a token exists, ask for the page again. A token the WAF accepts
-    gets a 200 and the site sets its own cookies; one it does not gets another
-    202, and we keep waiting.
+    The WAF serves `challenge.js` — ~300 KB — on every challenge round, and a
+    browser launched fresh has an empty cache, so it is paid for on every single
+    bootstrap. A profile that survives between runs turns that into a conditional
+    request. Chromium will not share a profile across processes, so a second
+    caller (the CLI, say, while the panel is polling) quietly gets a throwaway
+    one instead of failing: a cold cache is a cost, not an error.
     """
-    deadline = time.monotonic() + seconds
-    status: int | None = None
-    while True:
-        cookies = {c["name"]: c["value"] for c in ctx.cookies()}
-        if "aws-waf-token" in cookies:
-            response = page.goto(
-                INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000
+    if settings.browser_profile:
+        profile = settings.data_dir / PROFILE_DIR
+        try:
+            profile.mkdir(parents=True, exist_ok=True)
+            ctx = pw.chromium.launch_persistent_context(
+                str(profile), **_launch_options(settings), **_context_options()
             )
-            status = response.status if response else None
-            cookies = {c["name"]: c["value"] for c in ctx.cookies()}
-            if status == 200 and len(cookies) > 1:
-                return cookies, status
-            log.debug(
-                "token not accepted yet (HTTP %s, %d cookies), waiting",
-                status,
-                len(cookies),
+            # A persistent context opens with a blank tab already in hand.
+            return ctx, (ctx.pages[0] if ctx.pages else ctx.new_page())
+        except Blocked:
+            raise
+        except Exception as e:  # noqa: BLE001 — any profile problem is non-fatal
+            log.warning(
+                "could not open the cached browser profile (%s); "
+                "falling back to a cold one",
+                e,
             )
-        if time.monotonic() >= deadline:
-            return {c["name"]: c["value"] for c in ctx.cookies()}, status
-        page.wait_for_timeout(1_000)
+
+    browser = pw.chromium.launch(**_launch_options(settings))
+    ctx = browser.new_context(**_context_options())
+    return ctx, ctx.new_page()
+
+
+def _close_context(ctx: Any) -> None:
+    """Close a context and, if it has one, the browser behind it.
+
+    A persistent context owns its browser and reports `.browser` as None; a
+    normal one does not, and leaks a Chromium if only the context is closed.
+    """
+    browser = None
+    try:
+        browser = ctx.browser
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        pass
+    for obj in (ctx, browser):
+        try:
+            if obj is not None:
+                obj.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+# How long the challenge script gets to make progress on its own before we
+# reload for it, and how many times we are willing to do that. Reloading is not
+# free: it cancels whatever round is running, and the WAF counts cancelled rounds
+# against an attempt limit, so an impatient loop does not merely fail — it burns
+# the budget that would have let a patient one through.
+SELF_RELOAD_GRACE = 6.0
+MAX_RELOADS = 3
+POLL_MS = 500
+
+
+def _jar(ctx: Any) -> dict[str, str]:
+    return {c["name"]: c["value"] for c in ctx.cookies()}
 
 
 def _cleared(cookies: dict[str, str]) -> bool:
+    """A cleared session carries the token *and* the cookies the site itself sets."""
     return "aws-waf-token" in cookies and len(cookies) > 1
+
+
+def _exhausted(page: Any) -> bool:
+    """True once the WAF has stopped answering this client's challenges."""
+    try:
+        return any(m in page.content().lower() for m in EXHAUSTED_MARKERS)
+    except Exception:  # noqa: BLE001 — a page mid-navigation is not an answer
+        return False
+
+
+def _clear_challenge(
+    page: Any, ctx: Any, seconds: float, *, status: int | None = None
+) -> tuple[dict[str, str], int | None]:
+    """Wait for the challenge to *clear*, not merely for a token to appear.
+
+    The WAF answers the first request with a 202 interstitial whose script solves
+    a proof of work, sets `aws-waf-token`, and then reloads the page itself. Only
+    that reload validates the token: one lifted straight out of the cookie jar is
+    answered 202 on its very first use, which looks exactly like an IP problem
+    and is not one.
+
+    The trap is reloading *for* the script. A `goto` mid-challenge cancels the
+    round, and the WAF only allows a few cancelled rounds before it stops issuing
+    challenges altogether — a hard block, arrived at from a position where doing
+    nothing would have worked. So the script gets first refusal: this watches the
+    navigations it makes on its own and only steps in once nothing has happened
+    for `SELF_RELOAD_GRACE`, at most `MAX_RELOADS` times.
+    """
+    # The challenge script's own reload is a navigation we did not issue, so its
+    # status has to be caught in flight rather than read off a `goto` result.
+    nav: dict[str, Any] = {"status": status, "at": time.monotonic()}
+
+    def on_response(r: Any) -> None:
+        try:
+            if r.request.resource_type == "document" and r.url.startswith(
+                "https://www.swiggy.com/"
+            ):
+                nav["status"], nav["at"] = r.status, time.monotonic()
+        except Exception:  # noqa: BLE001 — a listener must never raise
+            pass
+
+    page.on("response", on_response)
+    try:
+        deadline = time.monotonic() + seconds
+        reloads = 0
+        token_at: float | None = None
+        last_token: str | None = None
+
+        while True:
+            cookies = _jar(ctx)
+            if nav["status"] == 200 and _cleared(cookies):
+                return cookies, nav["status"]
+
+            token = cookies.get("aws-waf-token")
+            if token and token != last_token:
+                # A fresh challenge round just landed; it gets its own grace.
+                last_token, token_at = token, time.monotonic()
+
+            # Only intervene in a challenge that has stalled: a token exists, so
+            # the script got that far, but neither it nor the page has moved
+            # since. Without a token there is nothing a reload could validate,
+            # and restarting the round from scratch only spends another attempt.
+            idle = time.monotonic() - max(token_at or 0.0, nav["at"])
+            if token_at is not None and idle >= SELF_RELOAD_GRACE and reloads < MAX_RELOADS:
+                if _exhausted(page):
+                    log.debug("the WAF has stopped serving challenges; not reloading")
+                    return cookies, nav["status"]
+                reloads += 1
+                response = page.goto(
+                    INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000
+                )
+                if response is not None:
+                    nav["status"], nav["at"] = response.status, time.monotonic()
+                cookies = _jar(ctx)
+                if nav["status"] == 200 and _cleared(cookies):
+                    return cookies, nav["status"]
+                log.debug(
+                    "token not accepted (HTTP %s, %d cookies); reload %d/%d",
+                    nav["status"],
+                    len(cookies),
+                    reloads,
+                    MAX_RELOADS,
+                )
+                # That reload served a new challenge. Let it run before judging.
+                last_token, token_at = _jar(ctx).get("aws-waf-token"), time.monotonic()
+
+            if time.monotonic() >= deadline:
+                return _jar(ctx), nav["status"]
+            page.wait_for_timeout(POLL_MS)
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
 
 
 def mint_token(settings: Settings) -> SessionData:
@@ -215,21 +410,30 @@ def mint_token(settings: Settings) -> SessionData:
         "minting a fresh WAF token via headless Chromium (up to %ds)",
         settings.bootstrap_seconds,
     )
-    launch = _launch_options(settings)
     if settings.proxy:
         log.info("bootstrap is going out through the proxy")
+        _warn_if_rotating(settings)
 
     status: int | None = None
     html = ""
     failure_shot: bytes | None = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(**launch)
-        ctx = browser.new_context(**_context_options())
-        page = ctx.new_page()
-        page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
+        ctx, page = _open_context(p, settings)
+        if settings.block_images:
+            _block_cosmetics(ctx)
+        # Minting means *replacing* the token, and a reused profile still holds
+        # the last one. Drop the cookies, keep the cache — that is the whole
+        # point of the profile.
+        ctx.clear_cookies()
+        opened = page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
 
-        cookies, status = _clear_challenge(page, ctx, settings.bootstrap_seconds)
+        cookies, status = _clear_challenge(
+            page,
+            ctx,
+            settings.bootstrap_seconds,
+            status=opened.status if opened else None,
+        )
         if not _cleared(cookies):
             # Grab the evidence before the browser goes away.
             try:
@@ -237,7 +441,7 @@ def mint_token(settings: Settings) -> SessionData:
                 failure_shot = page.screenshot(full_page=False)
             except Exception:  # noqa: BLE001 — diagnostics must not mask the error
                 pass
-        browser.close()
+        _close_context(ctx)
 
     if not _cleared(cookies):
         why = _diagnose(html, cookies)
@@ -390,10 +594,15 @@ class BrowserClient:
         from playwright.sync_api import sync_playwright
 
         log.info("opening a browser session (calls will go out from the page)")
+        _warn_if_rotating(self._settings)
         self._pw = sync_playwright().start()
         try:
-            self._browser = self._pw.chromium.launch(**_launch_options(self._settings))
-            self._ctx = self._browser.new_context(**_context_options())
+            self._ctx, self._page = _open_context(self._pw, self._settings)
+            if self._settings.block_images:
+                _block_cosmetics(self._ctx)
+            # A reused profile carries the last run's cookies; the seeding below
+            # is the intended jar, so start from a known-empty one.
+            self._ctx.clear_cookies()
             # Seed whatever we already have; a still-good token means the page
             # loads without a challenge and we save the wait.
             if self._data.cookies:
@@ -408,11 +617,15 @@ class BrowserClient:
                         for n, v in self._data.cookies.items()
                     ]
                 )
-            self._page = self._ctx.new_page()
-            self._page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
+            opened = self._page.goto(
+                INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000
+            )
 
             cookies, status = _clear_challenge(
-                self._page, self._ctx, self._settings.bootstrap_seconds
+                self._page,
+                self._ctx,
+                self._settings.bootstrap_seconds,
+                status=opened.status if opened else None,
             )
             # Instamart is a SPA and redirects itself once the challenge
             # clears. Fetching mid-navigation destroys the execution context,
@@ -455,12 +668,13 @@ class BrowserClient:
                 pass
 
     def close(self) -> None:
-        for obj, how in ((self._browser, "close"), (self._pw, "stop")):
-            try:
-                if obj is not None:
-                    getattr(obj, how)()
-            except Exception:  # noqa: BLE001 — teardown must never raise
-                pass
+        if self._ctx is not None:
+            _close_context(self._ctx)
+        try:
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
         self._browser = self._pw = self._ctx = self._page = None
 
     # ── the httpx.Client surface `request()` uses ────────────────────
