@@ -101,3 +101,4 @@ def test_a_lone_token_is_diagnosed_as_an_unvalidated_challenge():
     why = _diagnose("<html>whatever</html>", {"aws-waf-token": "t"})
     assert "never validated" in why
     assert "sticky" in why
+

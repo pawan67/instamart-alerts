@@ -339,6 +339,19 @@ reads as a permanent block rather than a configuration problem. Most providers
 offer stickiness as a username suffix or a dedicated port; check yours. The
 symptom is `challenge not cleared` alongside a cookie count of one.
 
+A rotating exit also shows up as intermittent connection failures rather than
+WAF refusals, because the tunnel itself is being rebuilt underneath you:
+
+| In the log | What it is |
+| --- | --- |
+| `socksio…ProtocolError: Malformed reply` | the proxy answered the SOCKS handshake with something that is not a SOCKS reply — usually a concurrency or auth limit |
+| `The handshake operation timed out` | the tunnel opened, the upstream TLS stalled |
+| `UNEXPECTED_EOF_WHILE_READING` | the proxy dropped the connection mid-TLS |
+| a search returning `0 results` after a clean bootstrap | the token was minted on one exit and used from another |
+
+All four are retried on the same session, since the token was never the
+problem — nothing reached Swiggy.
+
 ## Command line
 
 ```sh

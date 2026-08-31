@@ -36,7 +36,23 @@ BACKOFF_SECONDS = (5.0, 20.0)
 # Anything that fails before Swiggy sees the request: a proxy that accepts the
 # connection then drops the TLS handshake, a timeout, a dead tunnel. Retryable
 # on the same session, since the token was never the problem.
-TRANSPORT_ERRORS = httpx.TransportError
+#
+# socksio raises through httpx's mapping rather than into it — a SOCKS proxy
+# that answers the handshake with garbage surfaces as socksio.ProtocolError,
+# which is not an httpx exception and so used to escape this ladder entirely and
+# kill the whole pass. It is the most ordinary proxy failure there is.
+_PROXY_ERRORS: tuple[type[BaseException], ...] = ()
+try:
+    from socksio.exceptions import ProtocolError as _SocksProtocolError
+
+    _PROXY_ERRORS = (_SocksProtocolError,)
+except ImportError:  # httpx installed without the socks extra
+    pass
+
+TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    httpx.TransportError,
+    *_PROXY_ERRORS,
+)
 
 
 @dataclass
@@ -129,7 +145,7 @@ def run_once(
                 results = _run(
                     settings, watchlist, client, data, dry_run, cooldown_hours
                 )
-            except (Blocked, TRANSPORT_ERRORS) as e:
+            except (Blocked, *TRANSPORT_ERRORS) as e:
                 failure = e
                 if isinstance(e, Blocked):
                     # A refused token only improves by being replaced, so drop
@@ -187,7 +203,10 @@ def _run(
     for watch in watchlist.active:
         try:
             products = search(client, data.store_id, watch.query)
-        except Blocked:
+        except (Blocked, *TRANSPORT_ERRORS):
+            # Neither is this watch's fault. A dead tunnel used to be recorded
+            # as "this watch failed" and the pass carried on, so a flaky proxy
+            # silently dropped a watch for that round instead of redialling.
             raise
         except (httpx.HTTPError, ValueError, KeyError) as e:
             log.error("watch %r failed: %s", watch.name, e)

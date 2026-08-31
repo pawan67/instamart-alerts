@@ -57,3 +57,21 @@ def test_a_captcha_wins_over_the_challenge_marker():
 @pytest.mark.parametrize("page", [CAPTCHA_PAGE.upper(), CAPTCHA_PAGE.lower()])
 def test_detection_is_case_insensitive(page):
     assert "CAPTCHA" in _diagnose(page, {})
+
+
+# ── the diagnosis has to pick the more specific story ────────────────
+def test_a_token_that_was_not_honoured_beats_the_generic_challenge_message():
+    """The challenge page always carries the awswaf markers, so testing for
+    those first hid the one diagnosis that says what to actually do."""
+    why = _diagnose(CHALLENGE_PAGE, {"aws-waf-token": "t"})
+    assert "never validated" in why
+    assert "sticky" in why
+
+
+def test_a_challenge_page_with_no_token_yet_still_says_give_it_longer():
+    why = _diagnose(CHALLENGE_PAGE, {})
+    assert "never finished" in why
+
+
+def test_a_captcha_still_wins_over_a_lone_token():
+    assert "CAPTCHA" in _diagnose(CAPTCHA_PAGE, {"aws-waf-token": "t"})

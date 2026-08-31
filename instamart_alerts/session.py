@@ -109,18 +109,18 @@ def _diagnose(html: str, cookies: dict[str, str]) -> str:
             "the WAF refused the page outright. The IP is blocked rather than "
             "challenged; a different egress (PROXY_URL) is the only fix"
         )
-    if any(m in lowered for m in CHALLENGE_MARKERS):
-        return (
-            "the challenge script loaded but never finished. Give it longer "
-            "(raise the bootstrap wait in the panel) — a small VPS can need "
-            "well over 20s"
-        )
     if list(cookies) == ["aws-waf-token"]:
         return (
             "the challenge handed over a token but never let the real page "
             "load, so the token was never validated. On a rotating proxy this "
             "is usually the exit IP changing between the challenge and the "
             "reload — use a sticky session"
+        )
+    if any(m in lowered for m in CHALLENGE_MARKERS):
+        return (
+            "the challenge script loaded but never finished. Give it longer "
+            "(raise the bootstrap wait in the panel) — a small VPS can need "
+            "well over 20s"
         )
     if not cookies:
         return (

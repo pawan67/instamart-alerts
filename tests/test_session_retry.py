@@ -302,3 +302,50 @@ def test_auto_does_not_pay_for_a_browser_when_the_first_try_works(tmp_path, monk
 def test_use_browser_on(tmp_path, transport, attempt, expected):
     s = _settings(tmp_path, transport=transport)
     assert runner.use_browser_on(attempt, s) is expected
+
+
+# ── proxy failures ───────────────────────────────────────────────────
+def test_a_socks_handshake_failure_is_retried_not_fatal(tmp_path, monkeypatch):
+    """socksio raises past httpx's mapping, so it used to kill the whole pass."""
+    from socksio.exceptions import ProtocolError
+
+    calls, transports = _stub_session(monkeypatch, tmp_path)
+    attempts = []
+
+    def flaky(settings, watchlist, client, data, dry_run, cooldown_hours):
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise ProtocolError("Malformed reply")
+        return ["ok"]
+
+    monkeypatch.setattr(runner, "_run", flaky)
+    assert runner.run_once(_settings(tmp_path), object()) == ["ok"]
+    assert len(attempts) == 2
+
+
+def test_a_socks_failure_that_never_clears_still_reraises(tmp_path, monkeypatch):
+    from socksio.exceptions import ProtocolError
+
+    _stub_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        runner, "_run", lambda *a: (_ for _ in ()).throw(ProtocolError("Malformed reply"))
+    )
+    with pytest.raises(ProtocolError):
+        runner.run_once(_settings(tmp_path), object())
+
+
+def test_a_dead_tunnel_keeps_the_session_rather_than_re_minting(tmp_path, monkeypatch):
+    """A transport error means Swiggy never saw us; the token is still good."""
+    calls, transports = _stub_session(monkeypatch, tmp_path)
+    attempts = []
+
+    def flaky(settings, watchlist, client, data, dry_run, cooldown_hours):
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise httpx.ConnectError("tunnel died")
+        return ["ok"]
+
+    monkeypatch.setattr(runner, "_run", flaky)
+    assert runner.run_once(_settings(tmp_path), object()) == ["ok"]
+    # Only one open_session: the client was reused, not rebuilt.
+    assert calls == [False]
