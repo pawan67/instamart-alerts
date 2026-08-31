@@ -405,7 +405,7 @@ function renderChatIds() {
     host,
     state.chatIds,
     () => {},
-    "958113963 or @channel",
+    "584219307 or @channel",
     (value) => {
       if (CHAT_ID_RE.test(value)) return true;
       toast(`“${value}” is not a chat id — expected a number, or @channelname.`, "bad");

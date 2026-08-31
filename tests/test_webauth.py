@@ -16,7 +16,7 @@ from instamart_alerts.config import Settings
 from instamart_alerts.webauth import AuthError, verify
 
 TOKEN = "8769371768:AAGtesttokenvaluenotarealbotsecret00"
-UID = 958113963
+UID = 584219307
 
 
 def settings(tmp_path: Path, *, chat_id: str = str(UID), token: str = TOKEN) -> Settings:
@@ -123,7 +123,7 @@ def test_someone_not_on_the_list_is_still_refused(tmp_path):
 
 
 def test_a_substring_of_a_configured_id_is_not_enough(tmp_path):
-    """'95811396' must not slip past because '958113963' is on the list."""
+    """'95811396' must not slip past because '584219307' is on the list."""
     s = settings(tmp_path, chat_id=f"{UID}9")
     with pytest.raises(AuthError, match="not configured"):
         verify(init_data(), s)

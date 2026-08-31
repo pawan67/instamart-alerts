@@ -95,11 +95,11 @@ def test_event_stream_is_gated(env, monkeypatch):
 
 # ── settings ─────────────────────────────────────────────────────────
 def test_saving_credentials_persists_and_is_masked(client, env):
-    r = client.put("/api/settings", json={"bot_token": TOKEN, "chat_id": "958113963"})
+    r = client.put("/api/settings", json={"bot_token": TOKEN, "chat_id": "584219307"})
     assert r.status_code == 200
     body = r.json()["settings"]
     assert body["telegram_ready"] is True
-    assert body["chat_id"] == "958113963"
+    assert body["chat_id"] == "584219307"
     # The raw token never leaves the server.
     assert TOKEN not in json.dumps(r.json())
     assert body["bot_token_masked"].startswith("1234567890:")
