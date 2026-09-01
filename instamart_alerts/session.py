@@ -201,6 +201,48 @@ def _warn_if_rotating(settings: Settings) -> None:
         log.warning(STICKY_HINT)
 
 
+# Reading the exit IP costs one tiny request to somebody who is not Swiggy. It is
+# worth it: a token refused on the very first use looks identical whether the
+# address moved under us or the WAF simply distrusts it, and only one of those is
+# fixable from here. A sticky session pins the exit for the whole session
+# regardless of destination, so two probes either side of the challenge settle it.
+EXIT_IP_URL = "https://api.ipify.org"
+
+
+def _exit_ip(ctx: Any) -> str:
+    """The address this browser leaves from, or "" if it cannot be read."""
+    page = None
+    try:
+        page = ctx.new_page()
+        r = page.goto(EXIT_IP_URL, wait_until="domcontentloaded", timeout=15_000)
+        return (r.text() if r is not None else "").strip()[:45]
+    except Exception:  # noqa: BLE001 — a diagnostic must never break a bootstrap
+        return ""
+    finally:
+        try:
+            if page is not None:
+                page.close()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
+
+
+def _report_exit_ip(before: str, after: str) -> None:
+    """Say whether the address held still while the challenge was being solved."""
+    if not before or not after:
+        return
+    if before == after:
+        log.info("exit IP held at %s across the challenge", before)
+        return
+    log.warning(
+        "the exit IP moved mid-bootstrap (%s then %s), so the reload that had to "
+        "validate the token came from a different address than the one that "
+        "solved for it — which is exactly the token the WAF refuses. %s",
+        before,
+        after,
+        STICKY_HINT,
+    )
+
+
 # A headless poller renders nothing, so every byte spent on things that exist
 # only to be looked at is pure proxy spend — and on residential bandwidth that is
 # metered by the gigabyte. Product thumbnails dominate an Instamart page. Scripts
@@ -426,6 +468,7 @@ def mint_token(settings: Settings) -> SessionData:
         # the last one. Drop the cookies, keep the cache — that is the whole
         # point of the profile.
         ctx.clear_cookies()
+        ip_before = _exit_ip(ctx) if settings.proxy else ""
         opened = page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
 
         cookies, status = _clear_challenge(
@@ -434,6 +477,8 @@ def mint_token(settings: Settings) -> SessionData:
             settings.bootstrap_seconds,
             status=opened.status if opened else None,
         )
+        if settings.proxy:
+            _report_exit_ip(ip_before, _exit_ip(ctx))
         if not _cleared(cookies):
             # Grab the evidence before the browser goes away.
             try:
@@ -617,6 +662,7 @@ class BrowserClient:
                         for n, v in self._data.cookies.items()
                     ]
                 )
+            ip_before = _exit_ip(self._ctx) if self._settings.proxy else ""
             opened = self._page.goto(
                 INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000
             )
@@ -627,6 +673,8 @@ class BrowserClient:
                 self._settings.bootstrap_seconds,
                 status=opened.status if opened else None,
             )
+            if self._settings.proxy:
+                _report_exit_ip(ip_before, _exit_ip(self._ctx))
             # Instamart is a SPA and redirects itself once the challenge
             # clears. Fetching mid-navigation destroys the execution context,
             # so let it come to rest before anyone calls request().

@@ -25,6 +25,15 @@ log = logging.getLogger("scheduler")
 # Poll sleeps in slices so toggling the switch off is felt immediately.
 TICK_SECONDS = 1.0
 
+# A pass that dies on the WAF carries no information the next pass can use: the
+# only thing that changes a verdict on an exit IP is time. Polling straight
+# through a block also feeds it, because every attempt starts challenge rounds
+# the WAF counts against us — so a run of failures does not just waste a browser
+# bootstrap, it deepens the hole. Each consecutive failure widens the gap, up to
+# a ceiling; one success puts it straight back to the configured interval.
+FAILURE_BACKOFF = (2, 4, 8)
+MAX_BACKOFF_MINUTES = 120
+
 
 # How many tracked products travel with a run event. The whole candidate list is
 # what makes a run reviewable — "best 36.1%" tells you nothing about the shape of
@@ -95,6 +104,8 @@ class Scheduler:
     _last_run: float = 0.0
     _last_error: str = ""
     _minutes: int = config.DEFAULT_POLL_MINUTES
+    # Consecutive failed scheduled passes, which is what widens the interval.
+    _failures: int = 0
 
     # ── introspection ────────────────────────────────────────────────
     @property
@@ -118,7 +129,9 @@ class Scheduler:
     def start(self, minutes: int) -> None:
         self._minutes = max(1, int(minutes))
         if self.running:
-            # Already up — just re-target the interval and reschedule.
+            # Already up — just re-target the interval and reschedule. Asking
+            # for an interval is asking for it now, not after a backoff.
+            self._failures = 0
             self._next_run = time.time() + self._minutes * 60
             self._wake.set()
             log.info("poller interval set to %d min", self._minutes)
@@ -153,12 +166,26 @@ class Scheduler:
             now = time.time()
             if now >= self._next_run:
                 self._poll()
-                self._next_run = time.time() + self._minutes * 60
+                self._next_run = time.time() + self._gap_minutes() * 60
                 self._broadcast()
             self._wake.wait(TICK_SECONDS)
             self._wake.clear()
         self._thread = None
         self._broadcast()
+
+    def _gap_minutes(self) -> int:
+        """Minutes until the next scheduled pass, widened by any failing run."""
+        if not self._failures:
+            return self._minutes
+        factor = FAILURE_BACKOFF[min(self._failures, len(FAILURE_BACKOFF)) - 1]
+        minutes = min(self._minutes * factor, MAX_BACKOFF_MINUTES)
+        log.warning(
+            "%d checks in a row failed — backing off to %d min to let the "
+            "block age out instead of feeding it",
+            self._failures,
+            minutes,
+        )
+        return minutes
 
     def _poll(self) -> None:
         settings = config.load()
@@ -203,6 +230,8 @@ class Scheduler:
             except Exception as e:  # noqa: BLE001 — reported, never fatal
                 log.exception("%s failed: %s", label, e)
                 self._last_error = str(e)
+                if trigger == "scheduled":
+                    self._failures += 1
                 event = {
                     "type": "run",
                     "trigger": trigger,
@@ -221,6 +250,9 @@ class Scheduler:
                 self._broadcast()
 
         self._last_error = ""
+        # A manual run clears it too: it is the same evidence that the WAF has
+        # let go, and there is no reason to sit out a backoff after seeing it.
+        self._failures = 0
         summary = summarise(results)
         alerted = sum(len(r["alerted"]) for r in summary)
         log.info(
