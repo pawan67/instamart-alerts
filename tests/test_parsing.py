@@ -30,6 +30,10 @@ def variation(sku: str, mrp: str, offer: str, **kw) -> dict:
             "offerApplied": {"listingDescription": kw.get("label", "24% OFF")},
         },
     }
+    if "allowed" in kw:
+        v["cartAllowedQuantity"] = {"allowedQuantity": kw["allowed"]}
+    if kw.get("no_inventory"):
+        del v["inventory"]
     if kw.get("no_price"):
         v["price"] = {}
     return v
@@ -108,6 +112,32 @@ def test_out_of_stock_flag_read_from_inventory():
     c = client_returning(payload(variation("S1", "100", "50", in_stock=False)))
     (p,) = search(c, "1", "eggs")
     assert not p.in_stock
+
+
+def test_parent_in_stock_flag_never_rescues_a_sold_out_variant(caplog):
+    """The item-level flag is true whenever *any* variant is available.
+
+    A sold-out 12-pack sitting under an in-stock single carries inStock=true on
+    the item, so reading it as a fallback used to send alerts for packs nobody
+    could buy. With no per-variant signal the variant is out of stock, full stop.
+    """
+    c = client_returning(payload(variation("S1", "100", "20", no_inventory=True)))
+    (p,) = search(c, "1", "eggs")
+    assert not p.in_stock
+    assert "no inventory.inStock" in caplog.text
+
+
+def test_zero_cart_allowance_is_out_of_stock():
+    """Swiggy leaves inStock true on variants it will not let you add to a cart."""
+    c = client_returning(payload(variation("S1", "100", "20", allowed=0)))
+    (p,) = search(c, "1", "eggs")
+    assert not p.in_stock
+
+
+def test_a_normal_cart_limit_is_still_in_stock():
+    c = client_returning(payload(variation("S1", "100", "20", allowed=2)))
+    (p,) = search(c, "1", "eggs")
+    assert p.in_stock
 
 
 def test_empty_feed_returns_nothing():

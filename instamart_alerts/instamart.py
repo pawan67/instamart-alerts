@@ -177,6 +177,28 @@ def ensure_location(client: httpx.Client, data: SessionData, area: str) -> bool:
     return True
 
 
+def _in_stock(variation: dict[str, Any]) -> bool | None:
+    """Is this exact variant buyable right now? None when Swiggy says nothing.
+
+    Only `variation.inventory.inStock` tracks the variant. The item-level
+    `inStock` sitting one level up is the parent product's flag — true when
+    *any* of its variants is available — so a sold-out 12-pack under an
+    in-stock single reads as in stock there. Measured 2026-09-01 over 485
+    variants: all 36 out-of-stock ones had item.inStock == true.
+
+    `cartAllowedQuantity.allowedQuantity == 0` is the same verdict from the
+    other side — nothing can be added to a cart — and is checked as a backstop
+    for the day `inventory` starts lying.
+    """
+    inventory = variation.get("inventory")
+    if not isinstance(inventory, dict) or "inStock" not in inventory:
+        return None
+    if not inventory["inStock"]:
+        return False
+    allowed = (variation.get("cartAllowedQuantity") or {}).get("allowedQuantity")
+    return allowed != 0
+
+
 def _iter_variations(payload: dict[str, Any]):
     for card in ((payload.get("data") or {}).get("cards") or []):
         inner = (card.get("card") or {}).get("card") or {}
@@ -212,6 +234,7 @@ def search(client: httpx.Client, store_id: str, query: str) -> list[Product]:
 
     out: list[Product] = []
     seen: set[str] = set()
+    unknown_stock = 0
     for item, v in _iter_variations(r.json()):
         price_block = v.get("price") or {}
         mrp = _money(price_block.get("mrp"))
@@ -223,6 +246,14 @@ def search(client: httpx.Client, store_id: str, query: str) -> list[Product]:
         if sku in seen:
             continue
         seen.add(sku)
+
+        # No stock signal means no alert. Guessing "available" here is how
+        # sold-out packs ended up in alerts, and a missed deal is the cheaper
+        # mistake of the two.
+        in_stock = _in_stock(v)
+        if in_stock is None:
+            unknown_stock += 1
+            in_stock = False
 
         out.append(
             Product(
@@ -236,11 +267,20 @@ def search(client: httpx.Client, store_id: str, query: str) -> list[Product]:
                 mrp=mrp,
                 price=offer,
                 discount_pct=round((mrp - offer) / mrp * 100, 1),
-                in_stock=bool((v.get("inventory") or {}).get("inStock", item.get("inStock"))),
+                in_stock=in_stock,
                 unit_price=price_block.get("unitLevelPrice") or "",
                 offer_label=(price_block.get("offerApplied") or {}).get(
                     "listingDescription", ""
                 ),
             )
+        )
+
+    if unknown_stock:
+        log.warning(
+            "%d of %d variants for %r carried no inventory.inStock — treating "
+            "them as out of stock; the field may have been renamed",
+            unknown_stock,
+            len(out),
+            query,
         )
     return out
