@@ -164,6 +164,22 @@
               <input class="input input--mono" id="in-cooldown" type="number" min="0" max="8760" step="1">
             </label>
           </div>
+          <label class="tick tick--row" title="Skip scheduled checks overnight">
+            <input type="checkbox" id="in-quiet"><span></span>
+            <span class="tick__text">Pause overnight<span class="field__aside" id="quiet-now"></span></span>
+          </label>
+          <div class="grid2">
+            <label class="field">
+              <span class="field__label">Quiet from <span class="field__aside">IST hour</span></span>
+              <input class="input input--mono" id="in-quiet-start" type="number" min="0" max="23" step="1">
+            </label>
+            <label class="field">
+              <span class="field__label">Until <span class="field__aside">IST hour, exclusive</span></span>
+              <input class="input input--mono" id="in-quiet-end" type="number" min="0" max="23" step="1">
+            </label>
+          </div>
+          <p class="note note--tight">Manual checks and dry runs always run — the pause is for the poller only.</p>
+
           <div class="row">
             <button class="btn btn--small" id="btn-save-timing">Save timing</button>
           </div>

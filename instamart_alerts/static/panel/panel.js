@@ -149,6 +149,11 @@ function applySnapshot(data) {
   $("#in-area").value = s.area || "";
   $("#in-minutes").value = s.poll_minutes;
   $("#in-cooldown").value = s.cooldown_hours;
+  $("#in-quiet").checked = s.quiet_hours !== false;
+  $("#in-quiet-start").value = s.quiet_start ?? 0;
+  $("#in-quiet-end").value = s.quiet_end ?? 6;
+  $("#quiet-now").textContent = s.quiet_now ? " · paused right now" : "";
+  syncQuiet();
   $("#in-proxy").value = s.proxy || "";
   $("#in-build").value = s.build_version || "";
   $("#in-build").placeholder = s.build_version_default || "2.367.0";
@@ -200,6 +205,18 @@ function applySnapshot(data) {
 }
 
 /** One pill, two facts: which bot is answering, and how many people it tells. */
+// The overnight pause. The hour fields stay visible when it is off — hiding
+// them would lose the window you had set — but go inert, so it is obvious they
+// are not doing anything.
+function syncQuiet() {
+  const on = $("#in-quiet").checked;
+  for (const id of ["#in-quiet-start", "#in-quiet-end"]) {
+    const el = $(id);
+    el.disabled = !on;
+    el.closest(".field").style.opacity = on ? "" : ".45";
+  }
+}
+
 function paintTelegramPill() {
   const s = state.settings;
   const n = (s.chat_ids || []).length;
@@ -900,6 +917,8 @@ function wire() {
       }
     });
 
+  $("#in-quiet").onchange = syncQuiet;
+
   $("#btn-save-timing").onclick = (e) =>
     withBusy(e.target, async () => {
       try {
@@ -909,6 +928,9 @@ function wire() {
             body: {
               poll_minutes: Number($("#in-minutes").value),
               cooldown_hours: Number($("#in-cooldown").value),
+              quiet_hours: $("#in-quiet").checked,
+              quiet_start: Number($("#in-quiet-start").value),
+              quiet_end: Number($("#in-quiet-end").value),
             },
           })
         );
