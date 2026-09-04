@@ -317,7 +317,8 @@ Read that before changing anything:
 | What the log says | What it means | What fixes it |
 | --- | --- | --- |
 | stopped answering challenges for this client | too many rounds were started and abandoned, so the WAF quit issuing them | wait it out, then a sticky session |
-| handed over a token but never let the real page load | issued and then not honoured — usually the exit IP changing underneath it | a sticky proxy session |
+| handed over a token but never let the real page load | issued and then not honoured — the exit IP changed underneath it | a sticky proxy session |
+| distrusted, not unstable | the exit held still and the token was refused anyway — this address is simply not wanted | nothing to change; the next attempt asks for another exit |
 | served an interactive CAPTCHA | the WAF wants a human; datacenter IPs get this often | a residential `PROXY_URL` |
 | refused the page outright | the IP is blocked, not challenged | a different egress |
 | challenge script never finished | still working when time ran out | raise the bootstrap wait |
@@ -333,31 +334,48 @@ PROXY_URL=socks5://user:pass@host:1080
 
 It routes both the browser bootstrap and the polling calls.
 
-**Use a sticky session.** The WAF ties the token to the IP that solved the
-challenge, so a rotating proxy that hands out a new exit between the challenge
-and the reload invalidates the token before it is ever used — every time, which
-reads as a permanent block rather than a configuration problem. Most providers
-offer stickiness as a username suffix or a dedicated port; check yours. The
-symptom is `challenge not cleared` alongside a cookie count of one, and the
-bootstrap logs a warning when the username pins nothing.
+### Write `{session}` into the username
 
-For DataImpulse the suffix goes on the username — `sessid` names the session and
-`sessttl` sets how long the IP is held (30 minutes by default, which is shorter
-than it looks when the poller runs every 15):
+The WAF ties the token to the IP that solved the challenge, so a rotating proxy
+that hands out a new exit between the challenge and the reload invalidates the
+token before it is ever used — every time, which reads as a permanent block
+rather than a configuration problem. The symptom is `challenge not cleared`
+alongside a cookie count of one.
+
+Providers all offer stickiness, and all spell it differently, so rather than
+guess at a format the URL says where the id goes. Put the literal string
+`{session}` in the username and a fresh id is filled in for every token:
 
 ```
-PROXY_URL=http://LOGIN__cr.in;sessid.instamart;sessttl.60:PASSWORD@gw.dataimpulse.com:10000
+PROXY_URL=http://LOGIN__cr.in;sessid.{session};sessttl.30:PASSWORD@gw.dataimpulse.com:10000
 ```
+
+| Provider | Username |
+| --- | --- |
+| DataImpulse | `LOGIN__cr.in;sessid.{session};sessttl.30` |
+| Bright Data | `brd-customer-<id>-zone-<zone>-session-{session}` |
+| Oxylabs | `customer-<id>-sessid-{session}-sesstime-30` |
+
+Filling it in per session rather than hardcoding one id is the point, and it
+buys two different things:
+
+- **One address per token.** The challenge, the reload that validates the token,
+  and every poll that carries it afterwards all leave from the same exit. A
+  cached session survives to its next poll instead of dying on first use, which
+  is the difference between a three-second check and a thirty-second one.
+- **A different address after a refusal.** A hardcoded id pins a bad exit as
+  firmly as a good one, and the WAF's verdict on an exit is the only thing a
+  retry can change. Each re-mint asks for a new id, so each attempt is a genuinely
+  new address rather than the same question asked three times.
+
+Without a placeholder the bootstrap logs a warning saying which of the two you
+are missing, and everything still works exactly as it did before.
 
 Keep the `http://` scheme even if your provider also offers SOCKS5 on the same
 port. Chromium cannot authenticate to a SOCKS5 proxy, and Chromium is what mints
 the token — so `socks5://user:pass@…` breaks the one call that matters while the
 cheap polls carry on working. The bootstrap refuses that combination outright
 rather than letting Playwright report it as a browser problem.
-
-Bright Data spells it `-session-`, Oxylabs `sessid-`. Any of them is enough to
-stop the exit moving; the point is that one poll's token has to still be valid
-on the connection that carries the next call.
 
 ### Quiet hours
 
@@ -393,8 +411,9 @@ polls.
 
 That makes *bootstrap frequency* the whole ball game. Three things keep it down:
 
-- **A sticky proxy session.** Without one the cached token is refused on nearly
-  every poll and each one pays for a fresh bootstrap. This is the big one.
+- **A sticky proxy session** — `{session}` in the proxy username. Without one the
+  cached token is refused on nearly every poll and each one pays for a fresh
+  bootstrap. This is the big one.
 - **`MAX_RELOADS`.** The old clearance loop reloaded once a second for the whole
   bootstrap window; every 202 it collected served `challenge.js` again, so a
   single failed bootstrap could spend several MB before giving up. It is capped

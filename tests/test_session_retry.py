@@ -78,7 +78,9 @@ def test_remint_keeps_the_store_lookup(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner,
         "mint_token",
-        lambda s: SessionData(cookies={"aws-waf-token": "fresh"}, device_id="new-device"),
+        lambda s, sid=None: SessionData(
+            cookies={"aws-waf-token": "fresh"}, device_id="new-device"
+        ),
     )
 
     client, data = runner.open_session(settings, force_refresh=True)

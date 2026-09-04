@@ -1,19 +1,21 @@
 """What the poller does once the WAF starts saying no.
 
-A blocked pass is not a transient hiccup the next pass can retry through: the
-only thing that changes a verdict on an exit IP is time, and every attempt in
-the meantime starts challenge rounds the WAF counts against us. So polling
-straight through a block is worse than not polling at all. These pin the two
-halves of the response — widen the gap while it is failing, and say out loud
-whether the address moved, since that is the one cause fixable from the panel.
+A blocked pass still costs a browser bootstrap and metered proxy bandwidth, so a
+run of them is worth slowing down for — but only mildly, because a retry now
+leaves from a different exit IP and the answer can change in minutes rather than
+hours. These pin the three halves of the response: widen the gap while it is
+failing, say out loud whether the address moved, and never charge a pass that was
+skipped rather than attempted to that count.
 """
 
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
+from instamart_alerts import scheduler
 from instamart_alerts.scheduler import (
     FAILURE_BACKOFF,
     MAX_BACKOFF_MINUTES,
@@ -34,7 +36,7 @@ def test_a_healthy_poller_keeps_the_interval_it_was_given():
     assert poller(failures=0)._gap_minutes() == 15
 
 
-@pytest.mark.parametrize("failures, expected", [(1, 30), (2, 60), (3, 120)])
+@pytest.mark.parametrize("failures, expected", [(1, 30), (2, 45), (3, 60)])
 def test_each_failure_in_a_row_widens_the_gap(failures, expected):
     assert poller(failures=failures)._gap_minutes() == expected
 
@@ -66,7 +68,7 @@ def test_failures_accumulate_across_passes():
     s = poller()
     for _ in range(3):
         s.execute("scheduled check", boom, trigger="scheduled")
-    assert s._gap_minutes() == 120
+    assert s._gap_minutes() == 60
 
 
 def test_a_manual_run_failing_does_not_push_the_schedule_out():
@@ -89,6 +91,36 @@ def test_a_manual_success_clears_it_too():
     s = poller(failures=3)
     s.execute("manual check", lambda: [], trigger="manual")
     assert s._failures == 0
+
+
+# ── a pass that never ran is not a pass that failed ──────────────────
+def test_a_quiet_night_sleeps_to_the_end_of_it_rather_than_ticking(monkeypatch):
+    """Waking every quarter hour to log that it is night is not a check, and
+    charging those wake-ups to the failure count blamed the interval on passes
+    nobody attempted."""
+    monkeypatch.setattr(scheduler.config, "load", lambda: SimpleNamespace(quiet_end=6))
+    monkeypatch.setattr(
+        scheduler.config, "minutes_until_quiet_end", lambda s, n=None: 92.0
+    )
+    s = poller(failures=3)
+    assert s._poll() == 92.0
+    assert s._failures == 3  # untouched: nothing was attempted
+
+
+@pytest.mark.parametrize("area, watches", [("", ["x"]), ("401209", [])])
+def test_nothing_to_poll_for_waits_the_plain_interval(monkeypatch, area, watches):
+    monkeypatch.setattr(scheduler.config, "in_quiet_hours", lambda s, n=None: False)
+    monkeypatch.setattr(
+        scheduler.config, "load", lambda: SimpleNamespace(area=area, watchlist_path="w")
+    )
+    monkeypatch.setattr(
+        scheduler.Watchlist,
+        "load",
+        staticmethod(lambda p: SimpleNamespace(active=watches)),
+    )
+    s = poller(minutes=15, failures=2)
+    assert s._poll() == 15
+    assert s._failures == 2
 
 
 # ── saying why ───────────────────────────────────────────────────────

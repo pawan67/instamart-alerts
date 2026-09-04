@@ -212,9 +212,10 @@
 
           <label class="field">
             <span class="field__label">Proxy <span class="field__aside">routes the browser bootstrap and the polls</span></span>
-            <input class="input input--mono" id="in-proxy" spellcheck="false" placeholder="socks5://user:pass@host:1080">
+            <input class="input input--mono" id="in-proxy" spellcheck="false" placeholder="http://user;sessid.{session}:pass@host:823">
           </label>
-          <p class="note note--tight">On a <b>rotating</b> residential proxy, ask for a <b>sticky session</b> — usually a username suffix or a dedicated port, check your provider. The WAF ties the token to the IP that solved the challenge, so an exit that changes between the challenge and the next call invalidates it every time.</p>
+          <p class="note note--tight">The WAF ties the token to the IP that solved the challenge, so on a <b>rotating</b> residential proxy an exit that changes between the challenge and the next call invalidates it every time. Write <code>{session}</code> into the username where your provider's <b>sticky-session</b> id goes and a fresh one is filled in for every token — same exit for the challenge, the reload and the polls, and a different exit each time one is refused.</p>
+          <p class="note note--tight">DataImpulse <code>user__cr.in;sessid.{session};sessttl.30</code> · Bright Data <code>brd-customer-…-session-{session}</code> · Oxylabs <code>customer-…-sessid-{session}-sesstime-30</code></p>
           <div class="grid2">
             <label class="field">
               <span class="field__label">Swiggy build version <span class="field__aside">x-build-version</span></span>

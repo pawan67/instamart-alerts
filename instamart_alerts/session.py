@@ -14,6 +14,7 @@ import logging
 import os
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,9 @@ class SessionData:
     area_label: str = ""
     lat: float | None = None
     lng: float | None = None
+    # The proxy sticky-session id this token was minted behind, so every poll
+    # that carries the token leaves from the address that was issued it.
+    proxy_session: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -54,6 +58,7 @@ class SessionData:
             "area_label": self.area_label,
             "lat": self.lat,
             "lng": self.lng,
+            "proxy_session": self.proxy_session,
         }
 
     @classmethod
@@ -65,6 +70,7 @@ class SessionData:
             area_label=d.get("area_label") or "",
             lat=d.get("lat"),
             lng=d.get("lng"),
+            proxy_session=d.get("proxy_session") or "",
         )
 
 
@@ -100,8 +106,17 @@ CHALLENGE_MARKERS = ("challenge.js", "token.awswaf.com", "awswaf")
 EXHAUSTED_MARKERS = ("max challenge attempts exceeded",)
 
 
-def _diagnose(html: str, cookies: dict[str, str]) -> str:
-    """Say why no token arrived, in terms of what to do about it."""
+def _diagnose(
+    html: str, cookies: dict[str, str], ip_held: bool | None = None
+) -> str:
+    """Say why no token arrived, in terms of what to do about it.
+
+    `ip_held` is what the probes either side of the challenge saw: True if the
+    exit address stayed put, False if it moved, None if it could not be read.
+    A refused token means opposite things in those two cases — one is a proxy
+    that will not hold still, the other an exit the WAF has simply decided
+    against — and only the first is worth changing a setting over.
+    """
     lowered = html.lower()
     if any(m in lowered for m in EXHAUSTED_MARKERS):
         return (
@@ -123,6 +138,14 @@ def _diagnose(html: str, cookies: dict[str, str]) -> str:
             "challenged; a different egress (PROXY_URL) is the only fix"
         )
     if list(cookies) == ["aws-waf-token"]:
+        if ip_held:
+            return (
+                "the challenge handed over a token and the WAF then refused it "
+                "on the reload, without the exit IP moving in between — so this "
+                "address is distrusted, not unstable. No setting here changes "
+                "that verdict; it takes a different exit, which is what the "
+                "next attempt asks for"
+            )
         return (
             "the challenge handed over a token but never let the real page "
             "load, so the token was never validated. On a rotating proxy this "
@@ -146,7 +169,7 @@ def _diagnose(html: str, cookies: dict[str, str]) -> str:
     )
 
 
-def _launch_options(settings: Settings) -> dict[str, Any]:
+def _launch_options(settings: Settings, proxy: str | None) -> dict[str, Any]:
     """Chromium launch arguments, shared by minting and the browser transport."""
     args = ["--disable-blink-features=AutomationControlled"]
     if os.geteuid() == 0:
@@ -154,8 +177,8 @@ def _launch_options(settings: Settings) -> dict[str, Any]:
         args += ["--no-sandbox", "--disable-dev-shm-usage"]
 
     launch: dict[str, Any] = {"headless": settings.headless, "args": args}
-    if settings.proxy:
-        parsed = urllib.parse.urlparse(settings.proxy)
+    if proxy:
+        parsed = urllib.parse.urlparse(proxy)
         # Chromium's SOCKS5 client cannot authenticate, so a socks5:// URL with
         # credentials dies inside Playwright with a message about browser
         # support that says nothing about the proxy. httpx has no such limit,
@@ -174,7 +197,7 @@ def _launch_options(settings: Settings) -> dict[str, Any]:
                 "password": parsed.password,
             }
         else:
-            launch["proxy"] = {"server": settings.proxy}
+            launch["proxy"] = {"server": proxy}
     return launch
 
 
@@ -182,23 +205,65 @@ def _launch_options(settings: Settings) -> dict[str, Any]:
 # username pins one. That breaks this design at both seams: the challenge and the
 # reload that validates its token leave from different addresses, and every later
 # httpx poll leaves from another one again, so a token that was minted fine is
-# refused on first use. Providers spell the parameter differently, so this only
-# looks for the shape of one.
+# refused on first use.
+#
+# Providers all spell the parameter differently, so rather than guess at a
+# format, the URL says where the id goes and this fills it in:
+#
+#   DataImpulse   user__cr.in;sessid.{session};sessttl.30
+#   Bright Data   brd-customer-<id>-zone-<zone>-session-{session}
+#   Oxylabs       customer-<id>-sessid-{session}-sesstime-30
+#
+# Filling it in per session rather than hardcoding one id is the whole point. A
+# fixed id pins a bad exit exactly as firmly as a good one, and the WAF's verdict
+# on an exit is the only thing a retry can hope to change — a new id is a new
+# address. So the id is minted alongside the token, rides on SessionData, and is
+# reused by every poll that carries that token; a re-mint asks for a new one.
+SESSION_PLACEHOLDER = "{session}"
+
+# The shape of a sticky-session parameter someone has already pinned by hand.
 STICKY_MARKERS = ("sessid", "session", "sess-", "sess.")
-STICKY_HINT = (
+
+ROTATING_HINT = (
     "the proxy username pins no session, so the exit IP can change between the "
-    "challenge and the reload that validates its token — and again on every "
-    "poll after that. Add your provider's sticky-session parameter "
-    "(DataImpulse: 'user__cr.in;sessid.instamart;sessttl.60')"
+    "challenge and the reload that validates its token — and again on every poll "
+    "after that. Put '{session}' in the username where your provider's "
+    "sticky-session id goes and a fresh one is filled in for every token "
+    "(DataImpulse: 'user__cr.in;sessid.{session};sessttl.30')"
+)
+PINNED_HINT = (
+    "the proxy username pins one fixed session, so every attempt leaves from the "
+    "same address the last one was refused at, and waiting is the only thing left "
+    "that can change the answer. Replace the literal id with '{session}' and each "
+    "re-mint gets a different exit instead"
 )
 
 
-def _warn_if_rotating(settings: Settings) -> None:
+def new_session_id() -> str:
+    """A short id for the proxy's sticky-session parameter."""
+    return uuid.uuid4().hex[:12]
+
+
+def proxy_url(settings: Settings, session_id: str) -> str | None:
+    """`settings.proxy` with the session placeholder filled in.
+
+    A plain substitution rather than a URL rewrite: the placeholder can sit
+    wherever the provider wants it, and `{`/`}` are not legal in userinfo, so
+    parsing first would risk mangling credentials that are already correct.
+    """
     if not settings.proxy:
+        return None
+    if SESSION_PLACEHOLDER not in settings.proxy:
+        return settings.proxy
+    return settings.proxy.replace(SESSION_PLACEHOLDER, session_id or new_session_id())
+
+
+def _warn_if_rotating(settings: Settings) -> None:
+    if not settings.proxy or SESSION_PLACEHOLDER in settings.proxy:
         return
     user = (urllib.parse.urlparse(settings.proxy).username or "").lower()
-    if not any(m in user for m in STICKY_MARKERS):
-        log.warning(STICKY_HINT)
+    pinned = any(m in user for m in STICKY_MARKERS)
+    log.warning(PINNED_HINT if pinned else ROTATING_HINT)
 
 
 # Reading the exit IP costs one tiny request to somebody who is not Swiggy. It is
@@ -226,21 +291,22 @@ def _exit_ip(ctx: Any) -> str:
             pass
 
 
-def _report_exit_ip(before: str, after: str) -> None:
-    """Say whether the address held still while the challenge was being solved."""
+def _report_exit_ip(before: str, after: str) -> bool | None:
+    """Did the address hold still across the challenge? None if unreadable."""
     if not before or not after:
-        return
+        return None
     if before == after:
         log.info("exit IP held at %s across the challenge", before)
-        return
+        return True
     log.warning(
         "the exit IP moved mid-bootstrap (%s then %s), so the reload that had to "
         "validate the token came from a different address than the one that "
         "solved for it — which is exactly the token the WAF refuses. %s",
         before,
         after,
-        STICKY_HINT,
+        ROTATING_HINT,
     )
+    return False
 
 
 # A headless poller renders nothing, so every byte spent on things that exist
@@ -280,7 +346,7 @@ INSTAMART_URL = "https://www.swiggy.com/instamart"
 PROFILE_DIR = "chromium-profile"
 
 
-def _open_context(pw: Any, settings: Settings) -> tuple[Any, Any]:
+def _open_context(pw: Any, settings: Settings, proxy: str | None) -> tuple[Any, Any]:
     """A Chromium context and its page, reusing one profile where it can.
 
     The WAF serves `challenge.js` — ~300 KB — on every challenge round, and a
@@ -295,7 +361,7 @@ def _open_context(pw: Any, settings: Settings) -> tuple[Any, Any]:
         try:
             profile.mkdir(parents=True, exist_ok=True)
             ctx = pw.chromium.launch_persistent_context(
-                str(profile), **_launch_options(settings), **_context_options()
+                str(profile), **_launch_options(settings, proxy), **_context_options()
             )
             # A persistent context opens with a blank tab already in hand.
             return ctx, (ctx.pages[0] if ctx.pages else ctx.new_page())
@@ -308,7 +374,7 @@ def _open_context(pw: Any, settings: Settings) -> tuple[Any, Any]:
                 e,
             )
 
-    browser = pw.chromium.launch(**_launch_options(settings))
+    browser = pw.chromium.launch(**_launch_options(settings, proxy))
     ctx = browser.new_context(**_context_options())
     return ctx, ctx.new_page()
 
@@ -339,6 +405,12 @@ def _close_context(ctx: Any) -> None:
 SELF_RELOAD_GRACE = 6.0
 MAX_RELOADS = 3
 POLL_MS = 500
+
+# Once the reloads are spent and the page has gone this long without moving, the
+# rest of the wait is spent watching something that has stopped. Ending it early
+# is not impatience: the only lever left is a different exit IP, and the caller
+# reaches that sooner.
+GIVE_UP_IDLE = SELF_RELOAD_GRACE * 2
 
 
 def _jar(ctx: Any) -> dict[str, str]:
@@ -433,6 +505,11 @@ def _clear_challenge(
                 )
                 # That reload served a new challenge. Let it run before judging.
                 last_token, token_at = _jar(ctx).get("aws-waf-token"), time.monotonic()
+                idle = 0.0
+
+            if reloads >= MAX_RELOADS and idle >= GIVE_UP_IDLE:
+                log.debug("out of reloads and the page has stopped; giving up early")
+                return _jar(ctx), nav["status"]
 
             if time.monotonic() >= deadline:
                 return _jar(ctx), nav["status"]
@@ -444,31 +521,40 @@ def _clear_challenge(
             pass
 
 
-def mint_token(settings: Settings) -> SessionData:
-    """Launch headless Chromium, clear the WAF challenge, keep the cookies."""
+def mint_token(settings: Settings, session_id: str | None = None) -> SessionData:
+    """Launch headless Chromium, clear the WAF challenge, keep the cookies.
+
+    `session_id` is the proxy sticky-session this token is minted behind; it is
+    stored on the result so the polls that carry the token leave from the same
+    address. A fresh id means a fresh exit, which is what makes a retry after a
+    refusal worth making at all.
+    """
     from playwright.sync_api import sync_playwright  # imported lazily: slow
 
     log.info(
         "minting a fresh WAF token via headless Chromium (up to %ds)",
         settings.bootstrap_seconds,
     )
-    if settings.proxy:
+    session_id = session_id or new_session_id()
+    proxy = proxy_url(settings, session_id)
+    if proxy:
         log.info("bootstrap is going out through the proxy")
         _warn_if_rotating(settings)
 
     status: int | None = None
     html = ""
     failure_shot: bytes | None = None
+    held: bool | None = None
 
     with sync_playwright() as p:
-        ctx, page = _open_context(p, settings)
+        ctx, page = _open_context(p, settings, proxy)
         if settings.block_images:
             _block_cosmetics(ctx)
         # Minting means *replacing* the token, and a reused profile still holds
         # the last one. Drop the cookies, keep the cache — that is the whole
         # point of the profile.
         ctx.clear_cookies()
-        ip_before = _exit_ip(ctx) if settings.proxy else ""
+        ip_before = _exit_ip(ctx) if proxy else ""
         opened = page.goto(INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000)
 
         cookies, status = _clear_challenge(
@@ -477,8 +563,8 @@ def mint_token(settings: Settings) -> SessionData:
             settings.bootstrap_seconds,
             status=opened.status if opened else None,
         )
-        if settings.proxy:
-            _report_exit_ip(ip_before, _exit_ip(ctx))
+        if proxy:
+            held = _report_exit_ip(ip_before, _exit_ip(ctx))
         if not _cleared(cookies):
             # Grab the evidence before the browser goes away.
             try:
@@ -489,7 +575,7 @@ def mint_token(settings: Settings) -> SessionData:
         _close_context(ctx)
 
     if not _cleared(cookies):
-        why = _diagnose(html, cookies)
+        why = _diagnose(html, cookies, held)
         _save_failure(settings, html, failure_shot)
         log.error(
             "bootstrap failed: HTTP %s, %d cookies, %d bytes of HTML — %s",
@@ -504,7 +590,9 @@ def mint_token(settings: Settings) -> SessionData:
     # deviceId arrives signed as `s:<uuid>.<signature>`; the API wants the uuid.
     raw = urllib.parse.unquote(cookies.get("deviceId", ""))
     device_id = raw.removeprefix("s:").split(".")[0]
-    return SessionData(cookies=cookies, device_id=device_id)
+    return SessionData(
+        cookies=cookies, device_id=device_id, proxy_session=session_id
+    )
 
 
 def _save_failure(settings: Settings, html: str, shot: bytes | None) -> None:
@@ -640,9 +728,14 @@ class BrowserClient:
 
         log.info("opening a browser session (calls will go out from the page)")
         _warn_if_rotating(self._settings)
+        # An empty id means there is no cached token to stay next to, so this is
+        # a fresh start and it may as well be from a fresh exit.
+        if not self._data.proxy_session:
+            self._data.proxy_session = new_session_id()
+        proxy = proxy_url(self._settings, self._data.proxy_session)
         self._pw = sync_playwright().start()
         try:
-            self._ctx, self._page = _open_context(self._pw, self._settings)
+            self._ctx, self._page = _open_context(self._pw, self._settings, proxy)
             if self._settings.block_images:
                 _block_cosmetics(self._ctx)
             # A reused profile carries the last run's cookies; the seeding below
@@ -662,7 +755,7 @@ class BrowserClient:
                         for n, v in self._data.cookies.items()
                     ]
                 )
-            ip_before = _exit_ip(self._ctx) if self._settings.proxy else ""
+            ip_before = _exit_ip(self._ctx) if proxy else ""
             opened = self._page.goto(
                 INSTAMART_URL, wait_until="domcontentloaded", timeout=60_000
             )
@@ -673,8 +766,9 @@ class BrowserClient:
                 self._settings.bootstrap_seconds,
                 status=opened.status if opened else None,
             )
-            if self._settings.proxy:
-                _report_exit_ip(ip_before, _exit_ip(self._ctx))
+            held: bool | None = None
+            if proxy:
+                held = _report_exit_ip(ip_before, _exit_ip(self._ctx))
             # Instamart is a SPA and redirects itself once the challenge
             # clears. Fetching mid-navigation destroys the execution context,
             # so let it come to rest before anyone calls request().
@@ -686,7 +780,7 @@ class BrowserClient:
                     html, shot = self._page.content(), self._page.screenshot()
                 except Exception:  # noqa: BLE001 — diagnostics only
                     pass
-                why = _diagnose(html, cookies)
+                why = _diagnose(html, cookies, held)
                 _save_failure(self._settings, html, shot)
                 log.error(
                     "browser session not cleared: HTTP %s, %d cookies — %s",
@@ -803,7 +897,10 @@ def build_client(settings: Settings, data: SessionData) -> httpx.Client:
         cookies=jar,
         timeout=30.0,
         follow_redirects=True,
-        proxy=settings.proxy,
+        # The same exit the token was minted behind. A token validated from one
+        # address and first used from another is refused, which is what made
+        # every cached session die on its first call.
+        proxy=proxy_url(settings, data.proxy_session),
     )
 
 

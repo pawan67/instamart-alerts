@@ -130,6 +130,22 @@ def in_quiet_hours(settings: Settings, now: datetime | None = None) -> bool:
     return hour >= settings.quiet_start or hour < settings.quiet_end
 
 
+def minutes_until_quiet_end(settings: Settings, now: datetime | None = None) -> float:
+    """Minutes from now until the quiet window ends. 0 when not inside one.
+
+    The poller uses this instead of its own interval so a quiet night is one
+    sleep rather than a check every quarter of an hour that only logs that it
+    is night.
+    """
+    if not in_quiet_hours(settings, now):
+        return 0.0
+    now = (now or datetime.now(IST)).astimezone(IST)
+    end = now.replace(hour=settings.quiet_end, minute=0, second=0, microsecond=0)
+    if end <= now:
+        end += timedelta(days=1)
+    return (end - now).total_seconds() / 60.0
+
+
 def overrides_path(data_dir: Path) -> Path:
     """Runtime settings the web UI can change, layered over .env."""
     return data_dir / "settings.json"

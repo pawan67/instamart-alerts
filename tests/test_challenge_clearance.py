@@ -264,7 +264,7 @@ def test_an_authenticated_socks5_proxy_is_refused_before_playwright_sees_it():
         headless=True, proxy="socks5://user:pw@gw.dataimpulse.com:10000"
     )
     with pytest.raises(session.Blocked, match="http://"):
-        session._launch_options(settings)
+        session._launch_options(settings, settings.proxy)
 
 
 def test_the_same_gateway_over_http_is_accepted_sticky_username_and_all():
@@ -272,7 +272,7 @@ def test_the_same_gateway_over_http_is_accepted_sticky_username_and_all():
         headless=True,
         proxy="http://user__cr.in;sessid.instamart;sessttl.60:pw@gw.dataimpulse.com:10000",
     )
-    proxy = session._launch_options(settings)["proxy"]
+    proxy = session._launch_options(settings, settings.proxy)["proxy"]
     assert proxy["server"] == "http://gw.dataimpulse.com:10000"
     assert proxy["username"] == "user__cr.in;sessid.instamart;sessttl.60"
 
@@ -344,5 +344,7 @@ def test_a_locked_profile_falls_back_to_a_cold_browser_rather_than_failing(tmp_p
     settings = SimpleNamespace(
         browser_profile=True, data_dir=tmp_path, headless=True, proxy=None
     )
-    ctx, page = session._open_context(SimpleNamespace(chromium=Boom()), settings)
+    ctx, page = session._open_context(
+        SimpleNamespace(chromium=Boom()), settings, None
+    )
     assert page == "page"

@@ -45,6 +45,28 @@ def test_the_default_window_is_midnight_to_six(hour, quiet):
     assert in_quiet_hours(make(), at(hour)) is quiet
 
 
+@pytest.mark.parametrize(
+    "hour, minute, minutes_left",
+    [
+        (0, 0, 360),   # the whole window
+        (4, 28, 92),
+        (5, 59, 1),
+        (12, 0, 0),    # awake: nothing to wait out
+    ],
+)
+def test_a_quiet_night_is_one_sleep_not_a_tick_every_interval(
+    hour, minute, minutes_left
+):
+    assert config.minutes_until_quiet_end(make(), at(hour, minute)) == minutes_left
+
+
+def test_a_window_that_wraps_midnight_still_counts_forwards():
+    """22:00 -> 06:00, asked at 23:00, is seven hours of night left and not
+    minus seventeen."""
+    s = make(quiet_start=22, quiet_end=6)
+    assert config.minutes_until_quiet_end(s, at(23)) == 7 * 60
+
+
 def test_the_window_is_ist_not_whatever_the_container_thinks():
     """03:00 IST is 21:30 UTC the day before. A container on UTC must still
     pause, and must not pause at 03:00 UTC — which is 08:30 IST."""

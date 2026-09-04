@@ -18,6 +18,7 @@ from .session import (
     build_client,
     load_cached,
     mint_token,
+    new_session_id,
     save_cached,
     sync_cookies,
 )
@@ -29,7 +30,8 @@ log = logging.getLogger(__name__)
 # A blocked pass usually just means a stale token, but the replacement is only
 # accepted about half the time — the WAF sometimes hands out a token it has
 # already decided to re-challenge. Each retry costs a ~30s browser bootstrap,
-# so the ladder stays short.
+# so the ladder stays short. Every rung asks the proxy for a new sticky session,
+# so a retry is a different exit IP rather than the same one asked twice.
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (5.0, 20.0)
 
@@ -95,7 +97,9 @@ def open_session(
 
     if data is None or not data.cookies:
         prior = previous or load_cached(settings)
-        data = mint_token(settings)
+        # Never behind the exit that was just refused: whatever the last session
+        # used, this one asks for another.
+        data = mint_token(settings, new_session_id())
         # A new token does not invalidate the store lookup. Carrying it over
         # keeps the fresh session from spending its first two calls — the ones
         # most likely to be re-challenged — re-geocoding an area we resolved

@@ -25,14 +25,16 @@ log = logging.getLogger("scheduler")
 # Poll sleeps in slices so toggling the switch off is felt immediately.
 TICK_SECONDS = 1.0
 
-# A pass that dies on the WAF carries no information the next pass can use: the
-# only thing that changes a verdict on an exit IP is time. Polling straight
-# through a block also feeds it, because every attempt starts challenge rounds
-# the WAF counts against us — so a run of failures does not just waste a browser
-# bootstrap, it deepens the hole. Each consecutive failure widens the gap, up to
-# a ceiling; one success puts it straight back to the configured interval.
-FAILURE_BACKOFF = (2, 4, 8)
-MAX_BACKOFF_MINUTES = 120
+# A pass that dies on the WAF still costs a browser bootstrap and a few megabytes
+# of metered proxy bandwidth, so a run of them is worth slowing down for. It used
+# to be worth slowing down a *lot*: with one exit IP for everything, the only
+# thing that could change the WAF's verdict was time, so the gap doubled to two
+# hours. It no longer is — every attempt now asks the proxy for a new sticky
+# session, so a retry is a different address rather than the same one asked
+# again, and the answer can change in minutes. The ladder is short and the
+# ceiling low; one success puts it straight back to the configured interval.
+FAILURE_BACKOFF = (2, 3, 4)
+MAX_BACKOFF_MINUTES = 60
 
 
 # How many tracked products travel with a run event. The whole candidate list is
@@ -165,15 +167,16 @@ class Scheduler:
         while not self._stop.is_set():
             now = time.time()
             if now >= self._next_run:
-                self._poll()
-                self._next_run = time.time() + self._gap_minutes() * 60
+                skipped = self._poll()
+                gap = self._gap_minutes() if skipped is None else skipped
+                self._next_run = time.time() + gap * 60
                 self._broadcast()
             self._wake.wait(TICK_SECONDS)
             self._wake.clear()
         self._thread = None
         self._broadcast()
 
-    def _gap_minutes(self) -> int:
+    def _gap_minutes(self) -> float:
         """Minutes until the next scheduled pass, widened by any failing run."""
         if not self._failures:
             return self._minutes
@@ -187,21 +190,28 @@ class Scheduler:
         )
         return minutes
 
-    def _poll(self) -> None:
+    def _poll(self) -> float | None:
+        """Run a scheduled pass, or return the minutes to wait if it was skipped.
+
+        A skip is not a failure and must not be treated as one: a quiet night
+        used to leave the backoff warning in the log every couple of hours,
+        blaming an interval on checks that were never attempted.
+        """
         settings = config.load()
-        if config.in_quiet_hours(settings):
+        quiet = config.minutes_until_quiet_end(settings)
+        if quiet:
             log.info(
                 "quiet hours — no scheduled checks until %02d:00 IST",
                 settings.quiet_end,
             )
-            return
+            return quiet
         if not settings.area:
             log.warning("skipping poll — no delivery area set")
-            return
+            return float(self._minutes)
         watchlist = Watchlist.load(settings.watchlist_path)
         if not watchlist.active:
             log.warning("skipping poll — no enabled watches")
-            return
+            return float(self._minutes)
         self.execute(
             "scheduled check",
             lambda: run_once(
@@ -209,6 +219,7 @@ class Scheduler:
             ),
             trigger="scheduled",
         )
+        return None
 
     # ── the one place Instamart work happens ─────────────────────────
     def execute(
