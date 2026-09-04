@@ -7,6 +7,7 @@ import pytest
 
 from instamart_alerts import runner
 from instamart_alerts.config import API, Settings
+from instamart_alerts.runner import MAX_ATTEMPTS, EmptyPass, WatchResult
 from instamart_alerts.session import (
     Blocked,
     SessionData,
@@ -264,7 +265,7 @@ def test_auto_spends_the_cheap_attempts_before_the_browser(tmp_path, monkeypatch
     )
     with pytest.raises(Blocked):
         runner.run_once(_settings(tmp_path, transport="auto"), object())
-    assert transports == ["http", "http", "browser"]
+    assert transports == ["http"] * (MAX_ATTEMPTS - 1) + ["browser"]
 
 
 def test_browser_mode_skips_httpx_entirely(tmp_path, monkeypatch):
@@ -281,7 +282,7 @@ def test_http_mode_never_reaches_for_the_browser(tmp_path, monkeypatch):
     )
     with pytest.raises(Blocked):
         runner.run_once(_settings(tmp_path, transport="http"), object())
-    assert transports == ["http", "http", "http"]
+    assert transports == ["http"] * MAX_ATTEMPTS
 
 
 def test_auto_does_not_pay_for_a_browser_when_the_first_try_works(tmp_path, monkeypatch):
@@ -295,9 +296,9 @@ def test_auto_does_not_pay_for_a_browser_when_the_first_try_works(tmp_path, monk
     "transport, attempt, expected",
     [
         ("auto", 1, False),
-        ("auto", 2, False),
-        ("auto", 3, True),
-        ("http", 3, False),
+        ("auto", MAX_ATTEMPTS - 1, False),
+        ("auto", MAX_ATTEMPTS, True),  # the browser is the last roll, not the first
+        ("http", MAX_ATTEMPTS, False),
         ("browser", 1, True),
     ],
 )
@@ -307,6 +308,62 @@ def test_use_browser_on(tmp_path, transport, attempt, expected):
 
 
 # ── proxy failures ───────────────────────────────────────────────────
+def test_every_retry_has_a_rung_to_sleep_on():
+    """`BACKOFF_SECONDS[attempt - 1]` is indexed for every attempt but the last."""
+    assert len(runner.BACKOFF_SECONDS) == MAX_ATTEMPTS - 1
+
+
+# ── an empty pass ────────────────────────────────────────────────────
+def _empty(n: int = 3) -> EmptyPass:
+    return EmptyPass([WatchResult(object(), [], [], []) for _ in range(n)])
+
+
+def test_an_all_empty_pass_is_put_to_a_fresh_token(tmp_path, monkeypatch):
+    """A soured token stops refusing and starts agreeing the store is empty."""
+    calls, _ = _stub_session(monkeypatch, tmp_path)
+    attempts = []
+
+    def fake_run(settings, watchlist, client, data, dry_run, cooldown_hours):
+        attempts.append(data.cookies["aws-waf-token"])
+        if len(attempts) < 3:
+            raise _empty()
+        return ["ok"]
+
+    monkeypatch.setattr(runner, "_run", fake_run)
+
+    assert runner.run_once(_settings(tmp_path), object()) == ["ok"]
+    # A different token each time, which on a sticky proxy is a different exit.
+    assert attempts == ["t1", "t2", "t3"]
+    assert calls == [False, True, True]
+
+
+def test_an_all_empty_pass_is_believed_once_the_ladder_runs_out(tmp_path, monkeypatch):
+    """A watchlist really can have nothing in it; do not fail the pass over it."""
+    _stub_session(monkeypatch, tmp_path)
+    last = _empty()
+    monkeypatch.setattr(
+        runner, "_run", lambda *a: (_ for _ in ()).throw(last)
+    )
+
+    # Handed back, not raised: several independent tokens all said the same.
+    assert runner.run_once(_settings(tmp_path), object()) is last.results
+
+
+def test_a_block_after_an_empty_pass_still_reports_the_block(tmp_path, monkeypatch):
+    """The last word wins — an empty pass must not mask a real refusal."""
+    _stub_session(monkeypatch, tmp_path)
+    attempts = []
+
+    def fake_run(*a):
+        attempts.append(1)
+        raise _empty() if len(attempts) == 1 else Blocked("POST /search/v2 -> HTTP 202")
+
+    monkeypatch.setattr(runner, "_run", fake_run)
+
+    with pytest.raises(Blocked, match="search/v2"):
+        runner.run_once(_settings(tmp_path), object())
+
+
 def test_a_socks_handshake_failure_is_retried_not_fatal(tmp_path, monkeypatch):
     """socksio raises past httpx's mapping, so it used to kill the whole pass."""
     from socksio.exceptions import ProtocolError

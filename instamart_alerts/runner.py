@@ -28,12 +28,16 @@ from .watchlist import Watch, Watchlist
 log = logging.getLogger(__name__)
 
 # A blocked pass usually just means a stale token, but the replacement is only
-# accepted about half the time — the WAF sometimes hands out a token it has
-# already decided to re-challenge. Each retry costs a ~30s browser bootstrap,
-# so the ladder stays short. Every rung asks the proxy for a new sticky session,
-# so a retry is a different exit IP rather than the same one asked twice.
-MAX_ATTEMPTS = 3
-BACKOFF_SECONDS = (5.0, 20.0)
+# accepted about half the time — the WAF issues tokens from exits it has already
+# decided against, and that verdict belongs to the address, not to us. Waiting
+# does not change it; asking for another exit does, and every rung here mints
+# behind a new sticky session. So the ladder runs longer than a cool-off backoff
+# would want and its sleeps stay short: what buys a pass is another draw, not
+# another minute. Each rung still costs a ~30s bootstrap, which is what keeps
+# this a ladder and not a loop.
+BACKOFF_SECONDS = (5.0, 15.0, 20.0, 30.0)
+# One rung per sleep, plus the first attempt, which does not sleep at all.
+MAX_ATTEMPTS = len(BACKOFF_SECONDS) + 1
 
 # Anything that fails before Swiggy sees the request: a proxy that accepts the
 # connection then drops the TLS handshake, a timeout, a dead tunnel. Retryable
@@ -64,6 +68,21 @@ class WatchResult:
     hits: list[Product]  # candidates at or above the discount threshold
     alerted: list[Product]  # hits that were actually sent (post de-dup)
     error: str | None = None
+
+
+class EmptyPass(RuntimeError):
+    """Every watch ran, and between them they found nothing at all.
+
+    Not a refusal in the WAF's own terms — the calls came back 200 with valid
+    JSON — but a token it has soured on stops refusing and starts agreeing that
+    the store is empty, which is indistinguishable from a real answer until the
+    same question is put to a different token. Carries the results so the last
+    attempt can hand them back rather than throw them away.
+    """
+
+    def __init__(self, results: list[WatchResult]) -> None:
+        super().__init__(f"{len(results)} watches, 0 results between them")
+        self.results = results
 
 
 def open_session(
@@ -122,6 +141,21 @@ def use_browser_on(attempt: int, settings: Settings) -> bool:
     return attempt >= MAX_ATTEMPTS
 
 
+def _pause(attempt: int, what: str, action: str, why: BaseException) -> None:
+    """Announce the retry and sleep this rung of the ladder."""
+    delay = BACKOFF_SECONDS[attempt - 1]
+    log.warning(
+        "%s (%s); %s in %.0fs [attempt %d/%d]",
+        what,
+        why,
+        action,
+        delay,
+        attempt + 1,
+        MAX_ATTEMPTS,
+    )
+    time.sleep(delay)
+
+
 def run_once(
     settings: Settings,
     watchlist: Watchlist,
@@ -149,6 +183,23 @@ def run_once(
                 results = _run(
                     settings, watchlist, client, data, dry_run, cooldown_hours
                 )
+            except EmptyPass as e:
+                failure = e
+                if attempt == MAX_ATTEMPTS:
+                    # Out of rungs, so believe it: a watchlist really can have
+                    # nothing in it, and several independent tokens agreeing is
+                    # the strongest evidence available from here.
+                    log.warning("%s on every attempt — taking it at face value", e)
+                    results = e.results
+                else:
+                    # Nothing was recorded and nothing was sent, so there is no
+                    # half-finished pass to unwind — drop the token that
+                    # answered this way and put it to a different exit.
+                    if client is not None:
+                        client.close()
+                    client = None
+                    _pause(attempt, "empty pass", "re-minting", e)
+                    continue
             except (Blocked, *TRANSPORT_ERRORS) as e:
                 failure = e
                 if isinstance(e, Blocked):
@@ -163,17 +214,7 @@ def run_once(
                     # good. Keep the session and just redial.
                     what, action = "connection failed", "reconnecting"
                 if attempt < MAX_ATTEMPTS:
-                    delay = BACKOFF_SECONDS[attempt - 1]
-                    log.warning(
-                        "%s (%s); %s in %.0fs [attempt %d/%d]",
-                        what,
-                        e,
-                        action,
-                        delay,
-                        attempt + 1,
-                        MAX_ATTEMPTS,
-                    )
-                    time.sleep(delay)
+                    _pause(attempt, what, action, e)
                 continue
 
             # Swiggy rotates aws-waf-token as the session is used; keep the
@@ -203,6 +244,7 @@ def _run(
     state = AlertState.load(settings.data_dir / "alerts.json", cooldown_hours)
     results: list[WatchResult] = []
     live_keys: set[str] = set()
+    found = 0  # products returned across every search, before any filtering
 
     for watch in watchlist.active:
         try:
@@ -217,6 +259,7 @@ def _run(
             results.append(WatchResult(watch, [], [], [], error=str(e)))
             continue
 
+        found += len(products)
         candidates = [p for p in products if watch.matches(p)]
         hits = [p for p in candidates if watch.is_hit(p)]
         log.info(
@@ -250,6 +293,16 @@ def _run(
             sent = to_send  # dry run: report what would have gone out
 
         results.append(WatchResult(watch, candidates, hits, sent))
+
+    # Every watch coming back empty at once is not what a live store looks like.
+    # It used to be reported as a finished pass — "0 tracked, best 0%" — so a
+    # deal running during one of those windows went unseen and unlogged. Raise
+    # before anything is persisted and let the ladder ask a fresh token instead.
+    # A watch that errored is its own, already-reported problem and leaves the
+    # pass with no opinion to offer, so this asks for a clean sweep: every watch
+    # answered, and every one of them answered with nothing.
+    if results and not found and all(r.error is None for r in results):
+        raise EmptyPass(results)
 
     if not dry_run:
         state.prune(live_keys)
