@@ -10,10 +10,14 @@ Endpoints (all under https://www.swiggy.com/api/instamart, verified 2026-08-23):
                                             annotation, clientId}}
        -> the home feed for the resolved dark store; the store id is only
           exposed inside `swiggy://...?storeId=<n>` deeplinks in that payload.
-  POST /search/v2?storeId=&primaryStoreId=&offset=0&...
+  POST /search/v2?storeId=&primaryStoreId=&offset=<page>&...
        {"facets": [], "sortAttribute": "", "query": ..., "search_results_offset":
-        "0", "page_type": "INSTAMART_SEARCH_PAGE", "is_pre_search_tag": false}
+        <count so far>, "page_type": "INSTAMART_SEARCH_PAGE",
+        "is_pre_search_tag": false}
        -> data.cards[].card.card.gridElements.infoWithStyle.items[].variations[]
+       -> data.pageOffset.nextOffset + data.searchResultsOffset, which is how
+          the next page is asked for. One page is ~32 products; the tail is not
+          optional (see `search`).
 
 Prices are Google-style Money: `units` (string rupees) + `nanos` (1e-9 rupee).
 """
@@ -36,6 +40,15 @@ from .session import SessionData, request
 log = logging.getLogger(__name__)
 
 STORE_ID_RE = re.compile(r"storeId=(\d+)")
+
+# Search answers one page at a time — about 32 products — and hides the rest
+# behind `pageOffset.nextOffset`. A broad query like "yogurt" runs to four
+# pages, so reading only the first one means most of the aisle is never
+# examined: measured 2026-09-09 at store 1394450, page 1 held 73 of 231
+# variants. Every page is another call against the WAF, so the walk is capped;
+# nothing seen so far comes close to the cap, and hitting it is logged rather
+# than passed off as a complete read.
+MAX_SEARCH_PAGES = 8
 
 
 @dataclass(frozen=True)
@@ -208,14 +221,16 @@ def _iter_variations(payload: dict[str, Any]):
                 yield item, variation
 
 
-def search(client: httpx.Client, store_id: str, query: str) -> list[Product]:
-    """Run an Instamart search and flatten it to one row per purchasable variant."""
+def _search_page(
+    client: httpx.Client, store_id: str, query: str, offset: int, results_offset: str
+) -> dict[str, Any]:
+    """One page of search results, raw."""
     r = request(
         client,
         "POST",
         f"{API}/search/v2",
         params={
-            "offset": 0,
+            "offset": offset,
             "ageConsent": "false",
             "voiceSearchTrackingId": "",
             "storeId": store_id,
@@ -226,16 +241,63 @@ def search(client: httpx.Client, store_id: str, query: str) -> list[Product]:
             "facets": [],
             "sortAttribute": "",
             "query": query,
-            "search_results_offset": "0",
+            "search_results_offset": results_offset,
             "page_type": "INSTAMART_SEARCH_PAGE",
             "is_pre_search_tag": False,
         },
     )
+    return r.json() or {}
 
+
+def _search_pages(client: httpx.Client, store_id: str, query: str):
+    """Yield every page of a search, following Swiggy's own pagination cursor.
+
+    The cursor is two fields that have to travel together: `pageOffset.nextOffset`
+    is the page number, `searchResultsOffset` the running product count. Sending
+    the page number alone re-serves page one.
+    """
+    offset, results_offset = 0, "0"
+    for page in range(1, MAX_SEARCH_PAGES + 1):
+        payload = _search_page(client, store_id, query, offset, results_offset)
+        yield payload
+
+        data = payload.get("data") or {}
+        next_offset = (data.get("pageOffset") or {}).get("nextOffset")
+        try:
+            next_offset = int(next_offset)
+        except (TypeError, ValueError):
+            return  # absent or non-numeric: that was the last page
+        # A cursor that does not advance would otherwise re-read one page until
+        # the cap, spending calls to learn nothing.
+        if next_offset <= offset:
+            return
+        offset = next_offset
+        results_offset = str(data.get("searchResultsOffset") or "")
+        if page == MAX_SEARCH_PAGES:
+            log.warning(
+                "%r has more than %d pages of results — stopping there, so any "
+                "deal past product ~%s was not looked at",
+                query,
+                MAX_SEARCH_PAGES,
+                results_offset or "?",
+            )
+
+
+def search(client: httpx.Client, store_id: str, query: str) -> list[Product]:
+    """Run an Instamart search and flatten it to one row per purchasable variant.
+
+    Walks every page: the ranking puts plenty of ordinary stock past the first
+    one, and a discount does not care what page it landed on.
+    """
     out: list[Product] = []
     seen: set[str] = set()
     unknown_stock = 0
-    for item, v in _iter_variations(r.json()):
+    variations = (
+        pair
+        for payload in _search_pages(client, store_id, query)
+        for pair in _iter_variations(payload)
+    )
+    for item, v in variations:
         price_block = v.get("price") or {}
         mrp = _money(price_block.get("mrp"))
         offer = _money(price_block.get("offerPrice"))

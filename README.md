@@ -76,6 +76,16 @@ Prices are per dark store, so the session is pinned to a store before searching:
 present inside the `swiggy://…?storeId=<n>` deeplinks in the home feed it
 returns, so the code takes the most frequent one.
 
+`search/v2` answers one page at a time — roughly 32 products — and hides the
+rest behind `data.pageOffset.nextOffset`, which has to travel back out
+alongside `data.searchResultsOffset` or the same first page is served again.
+Each watch therefore costs one call per page rather than one call flat: a broad
+query like `yogurt` runs to four. Reading only the first page is not a smaller
+version of the same answer, it is a different one — measured at store 1394450,
+page one held 73 of 231 variants, and Instamart ranks by relevance, not by
+discount, so the deal worth waking up for is as likely to sit on page three.
+The walk stops at eight pages and says so in the log when it does.
+
 Discount is computed as `(mrp - offerPrice) / mrp`, both read from the search
 payload's Google-style Money objects (`units` rupees + `nanos`).
 

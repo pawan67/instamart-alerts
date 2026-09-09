@@ -150,3 +150,89 @@ def test_waf_refusal_raises_blocked(status):
     c = client_returning({}, status=status)
     with pytest.raises(Blocked):
         request(c, "GET", f"{instamart.API}/search/v2")
+
+
+# ── pagination ────────────────────────────────────────────────────────────────
+# Search serves ~32 products a page and keeps the rest behind a cursor. Reading
+# only page one hid two thirds of the "yogurt" aisle at store 1394450.
+
+
+def paged(*pages: dict) -> httpx.Client:
+    """A client that serves `pages` in order, keyed off the offset it is asked for."""
+    calls: list[tuple[int, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        offset = int(dict(request.url.params).get("offset", 0))
+        body = _json.loads(request.content or b"{}")
+        calls.append((offset, body.get("search_results_offset", "")))
+        if offset >= len(pages):
+            return httpx.Response(200, json={"data": {"cards": []}})
+        return httpx.Response(200, json=pages[offset])
+
+    c = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://www.swiggy.com"
+    )
+    c.calls = calls  # type: ignore[attr-defined]
+    return c
+
+
+def cursor(page: dict, next_offset: str | None, results_offset: str = "32") -> dict:
+    page["data"]["pageOffset"] = {"nextOffset": next_offset, "widgetOffset": {}}
+    page["data"]["searchResultsOffset"] = results_offset
+    return page
+
+
+def test_follows_the_cursor_across_pages():
+    c = paged(
+        cursor(payload(variation("S1", "100", "20")), "1", "32"),
+        cursor(payload(variation("S2", "100", "30")), "2", "75"),
+        cursor(payload(variation("S3", "100", "40")), None),
+    )
+    assert [p.sku_id for p in search(c, "1", "yogurt")] == ["S1", "S2", "S3"]
+    # Both halves of the cursor go back out: the page number and the running
+    # product count. Sending the number alone re-serves page one.
+    assert c.calls == [(0, "0"), (1, "32"), (2, "75")]  # type: ignore[attr-defined]
+
+
+def test_a_single_page_search_asks_for_nothing_more():
+    c = paged(payload(variation("S1", "100", "20")))
+    assert len(search(c, "1", "eggs")) == 1
+    assert len(c.calls) == 1  # type: ignore[attr-defined]
+
+
+def test_a_cursor_that_does_not_advance_stops_the_walk():
+    """A next-offset pointing at the page just read would loop to the cap."""
+    c = paged(cursor(payload(variation("S1", "100", "20")), "0"))
+    assert len(search(c, "1", "eggs")) == 1
+    assert len(c.calls) == 1  # type: ignore[attr-defined]
+
+
+def test_duplicate_skus_across_pages_are_counted_once():
+    c = paged(
+        cursor(payload(variation("S1", "100", "20")), "1"),
+        cursor(
+            payload(variation("S1", "100", "20"), variation("S2", "100", "30")), None
+        ),
+    )
+    assert [p.sku_id for p in search(c, "1", "yogurt")] == ["S1", "S2"]
+
+
+def test_the_page_cap_is_announced_not_swallowed(caplog):
+    """A truncated read must not look like a complete one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        offset = int(dict(request.url.params).get("offset", 0))
+        return httpx.Response(
+            200,
+            json=cursor(payload(variation(f"S{offset}", "100", "20")), str(offset + 1)),
+        )
+
+    c = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://www.swiggy.com"
+    )
+    with caplog.at_level("WARNING"):
+        products = search(c, "1", "yogurt")
+    assert len(products) == instamart.MAX_SEARCH_PAGES
+    assert "more than" in caplog.text
